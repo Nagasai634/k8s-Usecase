@@ -5,13 +5,12 @@ metadata:
   namespace: java-app
   annotations:
     kubernetes.io/ingress.class: "gce"
-    nginx.ingress.kubernetes.io/rewrite-target: /
 spec:
   rules:
   - http:
       paths:
-      - path: /
-        pathType: Prefix
+      - path: /*
+        pathType: ImplementationSpecific
         backend:
           service:
             name: java-gradle-service

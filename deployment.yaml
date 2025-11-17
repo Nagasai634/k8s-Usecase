@@ -5,35 +5,30 @@ metadata:
   namespace: java-app
   labels:
     app: java-gradle-app
-    version: "v1.0"
 spec:
-  replicas: 4
+  replicas: 3
   selector:
     matchLabels:
       app: java-gradle-app
   strategy:
     type: RollingUpdate
     rollingUpdate:
-      maxSurge: 2
-      maxUnavailable: 1
+      maxSurge: 1
+      maxUnavailable: 0
   minReadySeconds: 10
-  revisionHistoryLimit: 3
   template:
     metadata:
       labels:
         app: java-gradle-app
-        version: "v1.0"
     spec:
       containers:
       - name: java-app
-        image: us-central1-docker.pkg.dev/planar-door-476510-m1/java-app/java-app:v1.0-initial
+        image: us-central1-docker.pkg.dev/planar-door-476510-m1/java-app/java-app:latest
         ports:
         - containerPort: 8080
         env:
         - name: APP_VERSION
           value: "v1.0"
-        - name: APP_COLOR
-          value: "blue"
         resources:
           requests:
             memory: "256Mi"
@@ -45,11 +40,11 @@ spec:
           httpGet:
             path: /actuator/health
             port: 8080
-          initialDelaySeconds: 20
-          periodSeconds: 5
+          initialDelaySeconds: 30
+          periodSeconds: 10
         livenessProbe:
           httpGet:
             path: /actuator/health
             port: 8080
-          initialDelaySeconds: 30
-          periodSeconds: 10
+          initialDelaySeconds: 45
+          periodSeconds: 15

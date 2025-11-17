@@ -26,9 +26,17 @@ pipeline {
       }
     }
 
-    stage('Install kubectl') {
+    stage('Fix Permissions and Install Tools') {
       steps {
         sh '''
+          echo "=== Fixing Permissions and Installing Tools ==="
+          
+          # Fix gradlew permissions
+          cd k8s-Usecase/java-gradle
+          chmod +x ./gradlew
+          ls -la gradlew
+          
+          # Install kubectl
           mkdir -p ${WORKSPACE}/bin
           curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
           chmod +x ./kubectl
@@ -51,15 +59,17 @@ pipeline {
       }
     }
 
-    stage('Build Version 1 (Blue)') {
-      steps {
-        sh '''
-          cd k8s-Usecase/java-gradle
-          echo "=== Building Version 1 (Blue) ==="
-          
-          # Create version 1 with blue theme
-          mkdir -p src/main/resources/templates
-          cat > src/main/resources/templates/version.html << EOF
+    stage('Build Both Versions') {
+      parallel {
+        stage('Build Version 1 (Blue)') {
+          steps {
+            sh '''
+              cd k8s-Usecase/java-gradle
+              echo "=== Building Version 1 (Blue) ==="
+              
+              # Create version 1 with blue theme
+              mkdir -p src/main/resources/templates
+              cat > src/main/resources/templates/version.html << 'EOF'
 <!DOCTYPE html>
 <html>
 <head>
@@ -104,23 +114,23 @@ pipeline {
 </html>
 EOF
 
-          ./gradlew clean build --no-daemon
-          docker build -t ${GAR_IMAGE_V1} .
-          docker push ${GAR_IMAGE_V1}
-          echo "Version 1 (Blue) pushed: ${GAR_IMAGE_V1}"
-        '''
-      }
-    }
+              ./gradlew clean build --no-daemon
+              docker build -t ${GAR_IMAGE_V1} .
+              docker push ${GAR_IMAGE_V1}
+              echo "✅ Version 1 (Blue) pushed: ${GAR_IMAGE_V1}"
+            '''
+          }
+        }
 
-    stage('Build Version 2 (Green)') {
-      steps {
-        sh '''
-          cd k8s-Usecase/java-gradle
-          echo "=== Building Version 2 (Green) ==="
-          
-          # Create version 2 with green theme and new features
-          mkdir -p src/main/resources/templates
-          cat > src/main/resources/templates/version.html << EOF
+        stage('Build Version 2 (Green)') {
+          steps {
+            sh '''
+              cd k8s-Usecase/java-gradle
+              echo "=== Building Version 2 (Green) ==="
+              
+              # Create version 2 with green theme and new features
+              mkdir -p src/main/resources/templates
+              cat > src/main/resources/templates/version.html << 'EOF'
 <!DOCTYPE html>
 <html>
 <head>
@@ -168,40 +178,59 @@ EOF
 </html>
 EOF
 
-          ./gradlew clean build --no-daemon
-          docker build -t ${GAR_IMAGE_V2} .
-          docker push ${GAR_IMAGE_V2}
-          echo "Version 2 (Green) pushed: ${GAR_IMAGE_V2}"
-        '''
+              ./gradlew clean build --no-daemon
+              docker build -t ${GAR_IMAGE_V2} .
+              docker push ${GAR_IMAGE_V2}
+              echo "✅ Version 2 (Green) pushed: ${GAR_IMAGE_V2}"
+            '''
+          }
+        }
+      }
+    }
+
+    stage('Setup GKE Access') {
+      steps {
+        withCredentials([file(credentialsId: 'gcp-service-account-key', variable: 'GCP_SA_KEYFILE')]) {
+          sh '''
+            export PATH="${WORKSPACE}/bin:${PATH}"
+            echo "=== Setting up GKE Access ==="
+            
+            # Authenticate and get cluster credentials
+            gcloud auth activate-service-account --key-file="$GCP_SA_KEYFILE"
+            gcloud config set project ${PROJECT_ID}
+            
+            # Get cluster credentials using internal IP to avoid auth plugin issues
+            gcloud container clusters get-credentials ${CLUSTER_NAME} --region ${REGION} --project ${PROJECT_ID} --internal-ip
+            
+            # Create namespace if not exists
+            kubectl create namespace java-app --dry-run=client -o yaml | kubectl apply -f -
+            
+            echo "✅ GKE access configured"
+          '''
+        }
       }
     }
 
     stage('Deploy Version 1 (Initial)') {
       steps {
-        withCredentials([file(credentialsId: 'gcp-service-account-key', variable: 'GCP_SA_KEYFILE')]) {
-          sh '''
-            export PATH="${WORKSPACE}/bin:${PATH}"
-            gcloud auth activate-service-account --key-file="$GCP_SA_KEYFILE"
-            
-            # Get cluster credentials
-            gcloud container clusters get-credentials ${CLUSTER_NAME} --region ${REGION} --project ${PROJECT_ID} --internal-ip
-            
-            # Create namespace
-            kubectl create namespace java-app --dry-run=client -o yaml | kubectl apply -f -
-            
-            # Apply Kubernetes manifests
-            kubectl apply -f k8s-Usecase/k8s/ -n java-app
-            
-            # Deploy Version 1 initially
-            echo "=== Deploying Version 1 (Blue) as Initial Release ==="
-            kubectl set image deployment/java-gradle-app java-app=${GAR_IMAGE_V1} -n java-app --record
-            
-            # Wait for initial deployment
-            kubectl rollout status deployment/java-gradle-app -n java-app --timeout=300s
-            
-            echo "Version 1 deployed successfully!"
-          '''
-        }
+        sh '''
+          export PATH="${WORKSPACE}/bin:${PATH}"
+          echo "=== Deploying Version 1 (Blue) as Initial Release ==="
+          
+          # Apply Kubernetes manifests
+          kubectl apply -f k8s-Usecase/k8s/ -n java-app
+          
+          # Deploy Version 1 initially
+          kubectl set image deployment/java-gradle-app java-app=${GAR_IMAGE_V1} -n java-app --record
+          
+          # Wait for initial deployment
+          kubectl rollout status deployment/java-gradle-app -n java-app --timeout=300s
+          
+          echo "✅ Version 1 deployed successfully!"
+          
+          # Show deployment status
+          kubectl get pods -n java-app -l app=java-gradle-app
+        '''
       }
     }
 
@@ -211,7 +240,11 @@ EOF
           export PATH="${WORKSPACE}/bin:${PATH}"
           echo "=== Testing Version 1 ==="
           kubectl get pods -n java-app -l app=java-gradle-app
-          echo "Version 1 is running with Blue theme"
+          echo "🔵 Version 1 is running with Blue theme"
+          
+          # Get service info
+          echo "=== Service Information ==="
+          kubectl get svc,ingress -n java-app
         '''
       }
     }
@@ -226,10 +259,13 @@ EOF
           kubectl set image deployment/java-gradle-app java-app=${GAR_IMAGE_V2} -n java-app --record
           
           # Watch the rollout progress
-          echo "Rollout in progress... You should see both versions during transition"
-          kubectl rollout status deployment/java-gradle-app -n java-app --timeout=600s
+          echo "🔄 Rollout in progress... You should see both versions during transition"
+          timeout 300 bash -c 'while kubectl rollout status deployment/java-gradle-app -n java-app; do sleep 5; done'
           
-          echo "Version 2 rollout completed!"
+          echo "✅ Version 2 rollout completed!"
+          
+          # Show current pods
+          kubectl get pods -n java-app -l app=java-gradle-app -o wide
         '''
       }
     }
@@ -239,53 +275,40 @@ EOF
         sh '''
           export PATH="${WORKSPACE}/bin:${PATH}"
           echo "=== Verifying Version 2 ==="
-          kubectl get pods -n java-app -l app=java-gradle-app
+          
+          # Show deployment status
           kubectl get deployment java-gradle-app -n java-app -o wide
           
           # Get the service IP
           echo "=== Application Access ==="
-          IP=$(kubectl get ingress -n java-app -o jsonpath='{.items[0].status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "Not assigned yet")
-          echo "Access your application at: http://$IP"
-          echo "You should see the GREEN Version 2 interface"
+          IP=$(kubectl get ingress java-app-ingress -n java-app -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "Not assigned yet")
+          echo "🌐 Access your application at: http://$IP"
+          echo "🎨 You should see the GREEN Version 2 interface"
         '''
       }
     }
 
-    stage('Manual Rollback Decision') {
+    stage('Automatic Rollback Demo') {
       steps {
-        script {
-          def userInput = input(
-            id: 'userInput',
-            message: 'Do you want to rollback to Version 1?',
-            parameters: [
-              choice(
-                name: 'ROLLBACK_ACTION',
-                choices: ['NO - Keep Version 2', 'YES - Rollback to Version 1'],
-                description: 'Choose rollback action'
-              )
-            ]
-          )
+        sh '''
+          export PATH="${WORKSPACE}/bin:${PATH}"
+          echo "=== Demonstrating Automatic Rollback ==="
           
-          sh """
-            export PATH="${WORKSPACE}/bin:${PATH}"
-            if [ "$userInput" = "YES - Rollback to Version 1" ]; then
-              echo "=== Initiating Rollback to Version 1 (Blue) ==="
-              
-              # Check current revision
-              echo "Current deployment history:"
-              kubectl rollout history deployment/java-gradle-app -n java-app
-              
-              # Perform rollback
-              kubectl rollout undo deployment/java-gradle-app -n java-app
-              kubectl rollout status deployment/java-gradle-app -n java-app --timeout=300s
-              
-              echo "Rollback to Version 1 completed!"
-              echo "You should see the BLUE Version 1 interface again"
-            else
-              echo "Rollback skipped - Version 2 remains deployed"
-            fi
-          """
-        }
+          # Show current deployment history
+          echo "📋 Current deployment history:"
+          kubectl rollout history deployment/java-gradle-app -n java-app
+          
+          # Perform rollback to Version 1
+          echo "🔄 Rolling back to Version 1 (Blue)..."
+          kubectl rollout undo deployment/java-gradle-app -n java-app
+          kubectl rollout status deployment/java-gradle-app -n java-app --timeout=300s
+          
+          echo "✅ Rollback to Version 1 completed!"
+          echo "🔵 You should see the BLUE Version 1 interface again"
+          
+          # Show final status
+          kubectl get pods -n java-app -l app=java-gradle-app
+        '''
       }
     }
   }
@@ -295,43 +318,48 @@ EOF
       sh '''
         export PATH="${WORKSPACE}/bin:${PATH}"
         echo "=== Final Deployment Status ==="
-        kubectl get deployments,svc,pods -n java-app
         
+        # Show resources
+        kubectl get deployments,svc,pods -n java-app 2>/dev/null || echo "No resources found"
+        
+        # Show deployment history
         echo "=== Deployment History ==="
-        kubectl rollout history deployment/java-gradle-app -n java-app
+        kubectl rollout history deployment/java-gradle-app -n java-app 2>/dev/null || echo "No deployment history"
         
-        IP=$(kubectl get ingress -n java-app -o jsonpath='{.items[0].status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "Not assigned")
-        echo "Final Application URL: http://$IP"
+        # Get application URL
+        IP=$(kubectl get ingress java-app-ingress -n java-app -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "Not assigned")
+        echo "🌐 Final Application URL: http://$IP"
         
         # Show which version is currently deployed
-        CURRENT_IMAGE=$(kubectl get deployment java-gradle-app -n java-app -o jsonpath='{.spec.template.spec.containers[0].image}')
-        echo "Currently deployed image: $CURRENT_IMAGE"
+        CURRENT_IMAGE=$(kubectl get deployment java-gradle-app -n java-app -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || echo "Unknown")
+        echo "📦 Currently deployed image: $CURRENT_IMAGE"
         
         if echo "$CURRENT_IMAGE" | grep -q "v1.0"; then
           echo "🎯 CURRENT VERSION: 1.0 (Blue)"
-        else
+        elif echo "$CURRENT_IMAGE" | grep -q "v2.0"; then
           echo "🎯 CURRENT VERSION: 2.0 (Green)"
+        else
+          echo "🎯 CURRENT VERSION: Unknown"
         fi
       '''
     }
     
     success {
       sh '''
-        echo "=== Pipeline Completed Successfully ==="
+        echo "🎉 Pipeline Completed Successfully!"
         echo "Check the application URL above to see the deployed version"
+        echo "The pipeline demonstrated:"
+        echo "1. ✅ Built two versions (Blue v1.0 and Green v2.0)"
+        echo "2. ✅ Deployed Version 1 initially"
+        echo "3. ✅ Rolled out to Version 2"
+        echo "4. ✅ Automatically rolled back to Version 1"
       '''
     }
     
     failure {
       sh '''
-        echo "=== Pipeline Failed ==="
-        export PATH="${WORKSPACE}/bin:${PATH}"
-        # Attempt emergency rollback if deployment exists
-        if kubectl get deployment java-gradle-app -n java-app 2>/dev/null; then
-          echo "Attempting emergency rollback..."
-          kubectl rollout undo deployment/java-gradle-app -n java-app --timeout=300s
-          echo "Emergency rollback completed"
-        fi
+        echo "❌ Pipeline Failed"
+        echo "Check the logs above for details"
       '''
     }
   }
