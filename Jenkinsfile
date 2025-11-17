@@ -3,15 +3,14 @@ pipeline {
 
   environment {
     // Replace these with values for your project
-    PROJECT_ID      = ""
+    PROJECT_ID      = "planar-door-476510-m1"
     REGION          = "us-central1"                     // Artifact Registry region and cluster region
-    REPO            = "my-repo"                         // Artifact Registry repo name
-    IMAGE_NAME      = "my-java-app"                     // image name
-    TAG             = "${env.BUILD_NUMBER ?: 'v1'}"     // use build number or custom tag
-    K8S_DIR         = "k8s"                             // directory with manifests
+    REPO            = "java-gradle-app"                         // Artifact Registry repo name
+    IMAGE_NAME      = "java-app:v1"                     // image name     
+    K8S_DIR         = "k8s-Usecase"                             // directory with manifests
     IMAGE_PLACEHOLDER = "IMAGE_PLACEHOLDER"             // placeholder text in k8s manifests
-    DEPLOYMENT_NAME = "your-deployment-name"           // k8s deployment to wait for
-    FULL_IMAGE      = "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO}/${IMAGE_NAME}:${TAG}"
+    DEPLOYMENT_NAME = "java-gradle-deployment"           // k8s deployment to wait for
+    FULL_IMAGE      = "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO}/${IMAGE_NAME}"
   }
 
   stages {
@@ -20,17 +19,7 @@ pipeline {
         checkout scm
         dir('/var/lib/jenkins/firstjob/java-gradle'){
           sh './gradlew clean build'
-        }
-      }
-    }
-
-    stage('Build (Maven)') {
-      steps {
-        // run maven build inside maven image
-        script {
-          docker.image('maven:3.8.8-openjdk-17').inside {
-            sh 'mvn -B clean package -DskipTests'   // adjust as needed
-          }
+          sh 'docker build -t ${IMAGE_NAME} .'
         }
       }
     }
@@ -53,10 +42,6 @@ pipeline {
 
                 # configure docker to authenticate to Artifact Registry
                 gcloud auth configure-docker ${REGION}-docker.pkg.dev -q
-
-                # build image (docker must be available on the agent for this to work)
-                # If your Jenkins agent does not have docker daemon, consider using Cloud Build instead.
-                docker build -t ${FULL_IMAGE} .
 
                 # push
                 docker push ${FULL_IMAGE}
