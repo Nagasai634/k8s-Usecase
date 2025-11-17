@@ -18,7 +18,9 @@ pipeline {
 
     stage('Build') {
       steps {
-        sh './gradlew clean build'
+        dir('/var/lib/jenkins/firstjob/java-gradle'){
+          sh './gradlew clean build'
+        }
       }
     }
 
