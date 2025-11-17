@@ -58,6 +58,7 @@ pipeline {
           echo "=== Building Version 1 (Blue) ==="
           
           # Create version 1 with blue theme
+          mkdir -p src/main/resources/templates
           cat > src/main/resources/templates/version.html << EOF
 <!DOCTYPE html>
 <html>
@@ -118,6 +119,7 @@ EOF
           echo "=== Building Version 2 (Green) ==="
           
           # Create version 2 with green theme and new features
+          mkdir -p src/main/resources/templates
           cat > src/main/resources/templates/version.html << EOF
 <!DOCTYPE html>
 <html>
@@ -181,15 +183,18 @@ EOF
             export PATH="${WORKSPACE}/bin:${PATH}"
             gcloud auth activate-service-account --key-file="$GCP_SA_KEYFILE"
             
-            # Get cluster credentials (using legacy auth to avoid plugin issues)
+            # Get cluster credentials
             gcloud container clusters get-credentials ${CLUSTER_NAME} --region ${REGION} --project ${PROJECT_ID} --internal-ip
             
             # Create namespace
             kubectl create namespace java-app --dry-run=client -o yaml | kubectl apply -f -
             
+            # Apply Kubernetes manifests
+            kubectl apply -f k8s-Usecase/k8s/ -n java-app
+            
             # Deploy Version 1 initially
             echo "=== Deploying Version 1 (Blue) as Initial Release ==="
-            kubectl apply -f k8s-Usecase/k8s/ -n java-app
+            kubectl set image deployment/java-gradle-app java-app=${GAR_IMAGE_V1} -n java-app --record
             
             # Wait for initial deployment
             kubectl rollout status deployment/java-gradle-app -n java-app --timeout=300s
@@ -211,18 +216,18 @@ EOF
       }
     }
 
-    stage('Rollout Version 2 (Canary)') {
+    stage('Rollout Version 2') {
       steps {
         sh '''
           export PATH="${WORKSPACE}/bin:${PATH}"
-          echo "=== Rolling out Version 2 (Green) - Canary Deployment ==="
+          echo "=== Rolling out Version 2 (Green) ==="
           
           # Start rollout to Version 2
           kubectl set image deployment/java-gradle-app java-app=${GAR_IMAGE_V2} -n java-app --record
           
           # Watch the rollout progress
           echo "Rollout in progress... You should see both versions during transition"
-          kubectl rollout status deployment/java-gradle-app -n java-app --timeout=600s --watch
+          kubectl rollout status deployment/java-gradle-app -n java-app --timeout=600s
           
           echo "Version 2 rollout completed!"
         '''
@@ -246,34 +251,41 @@ EOF
       }
     }
 
-    stage('Rollback to Version 1 (If Needed)') {
+    stage('Manual Rollback Decision') {
       steps {
-        input {
-          message "Do you want to rollback to Version 1?"
-          ok "Yes, Rollback to Blue"
-          parameters {
-            booleanParam(name: 'ROLLBACK', defaultValue: false, description: 'Rollback to Version 1?')
-          }
+        script {
+          def userInput = input(
+            id: 'userInput',
+            message: 'Do you want to rollback to Version 1?',
+            parameters: [
+              choice(
+                name: 'ROLLBACK_ACTION',
+                choices: ['NO - Keep Version 2', 'YES - Rollback to Version 1'],
+                description: 'Choose rollback action'
+              )
+            ]
+          )
+          
+          sh """
+            export PATH="${WORKSPACE}/bin:${PATH}"
+            if [ "$userInput" = "YES - Rollback to Version 1" ]; then
+              echo "=== Initiating Rollback to Version 1 (Blue) ==="
+              
+              # Check current revision
+              echo "Current deployment history:"
+              kubectl rollout history deployment/java-gradle-app -n java-app
+              
+              # Perform rollback
+              kubectl rollout undo deployment/java-gradle-app -n java-app
+              kubectl rollout status deployment/java-gradle-app -n java-app --timeout=300s
+              
+              echo "Rollback to Version 1 completed!"
+              echo "You should see the BLUE Version 1 interface again"
+            else
+              echo "Rollback skipped - Version 2 remains deployed"
+            fi
+          """
         }
-        sh '''
-          export PATH="${WORKSPACE}/bin:${PATH}"
-          if [ "$ROLLBACK" = "true" ]; then
-            echo "=== Initiating Rollback to Version 1 (Blue) ==="
-            
-            # Check current revision
-            echo "Current deployment history:"
-            kubectl rollout history deployment/java-gradle-app -n java-app
-            
-            # Perform rollback
-            kubectl rollout undo deployment/java-gradle-app -n java-app
-            kubectl rollout status deployment/java-gradle-app -n java-app --timeout=300s
-            
-            echo "Rollback to Version 1 completed!"
-            echo "You should see the BLUE Version 1 interface again"
-          else
-            echo "Rollback skipped - Version 2 remains deployed"
-          fi
-        '''
       }
     }
   }
@@ -290,6 +302,36 @@ EOF
         
         IP=$(kubectl get ingress -n java-app -o jsonpath='{.items[0].status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "Not assigned")
         echo "Final Application URL: http://$IP"
+        
+        # Show which version is currently deployed
+        CURRENT_IMAGE=$(kubectl get deployment java-gradle-app -n java-app -o jsonpath='{.spec.template.spec.containers[0].image}')
+        echo "Currently deployed image: $CURRENT_IMAGE"
+        
+        if echo "$CURRENT_IMAGE" | grep -q "v1.0"; then
+          echo "🎯 CURRENT VERSION: 1.0 (Blue)"
+        else
+          echo "🎯 CURRENT VERSION: 2.0 (Green)"
+        fi
+      '''
+    }
+    
+    success {
+      sh '''
+        echo "=== Pipeline Completed Successfully ==="
+        echo "Check the application URL above to see the deployed version"
+      '''
+    }
+    
+    failure {
+      sh '''
+        echo "=== Pipeline Failed ==="
+        export PATH="${WORKSPACE}/bin:${PATH}"
+        # Attempt emergency rollback if deployment exists
+        if kubectl get deployment java-gradle-app -n java-app 2>/dev/null; then
+          echo "Attempting emergency rollback..."
+          kubectl rollout undo deployment/java-gradle-app -n java-app --timeout=300s
+          echo "Emergency rollback completed"
+        fi
       '''
     }
   }
