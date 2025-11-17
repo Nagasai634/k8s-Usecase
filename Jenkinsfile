@@ -134,6 +134,31 @@ EOF
       }
     }
 
+    stage('Clean Existing Deployment') {
+      when {
+        expression { params.DEPLOYMENT_ACTION == 'ROLLOUT' }
+      }
+      steps {
+        sh '''
+          export PATH="${WORKSPACE}/bin:${PATH}"
+          export KUBECONFIG=${KUBECONFIG}
+          
+          echo "🧹 Cleaning up existing deployment resources..."
+          
+          # Delete existing deployment and replicasets
+          kubectl delete deployment java-gradle-app -n java-app --ignore-not-found=true --timeout=30s
+          kubectl delete replicaset -l app=java-gradle-app -n java-app --ignore-not-found=true --timeout=30s
+          
+          # Wait for cleanup to complete
+          echo "⏳ Waiting for resources to be cleaned up..."
+          sleep 20
+          
+          # Verify cleanup
+          kubectl get deployment,replicaset,pod -n java-app --ignore-not-found=true
+        '''
+      }
+    }
+
     stage('Execute User Requested Action') {
       steps {
         script {
@@ -143,6 +168,14 @@ EOF
           echo "🎯 USER REQUESTED ACTION: ${action}"
           echo "🎯 SELECTED VERSION: ${version}"
           
+          // Determine the image tag in Groovy to avoid interpolation issues
+          def imageTag
+          if (version == 'v1.0') {
+            imageTag = env.GAR_IMAGE_V1
+          } else {
+            imageTag = env.GAR_IMAGE_V2
+          }
+          
           sh """
             export PATH="${WORKSPACE}/bin:${PATH}"
             export KUBECONFIG=${KUBECONFIG}
@@ -150,40 +183,148 @@ EOF
             if [ "${action}" = "ROLLOUT" ]; then
               echo "🚀 EXECUTING: Rolling out ${version}"
               kubectl create namespace java-app --dry-run=client -o yaml | kubectl apply -f -
-              # Apply manifests, skipping namespace and security policy if issues
-              kubectl apply -f k8s-Usecase/configmap.yaml -f k8s-Usecase/deployment.yaml -f k8s-Usecase/frontend-config.yaml -f k8s-Usecase/hpa.yaml -f k8s-Usecase/ingress.yaml -f k8s-Usecase/service.yaml -n java-app --validate=false
               
-              if [ "${version}" = "v1.0" ]; then
-                kubectl set image deployment/java-gradle-app java-app=${GAR_IMAGE_V1} -n java-app --record
+              echo "📦 Using image: ${imageTag}"
+              
+              # Apply base resources
+              kubectl apply -f k8s-Usecase/configmap.yaml -f k8s-Usecase/frontend-config.yaml -f k8s-Usecase/hpa.yaml -f k8s-Usecase/ingress.yaml -f k8s-Usecase/service.yaml -n java-app --validate=false
+              
+              # Create deployment with the specific image tag and health checks
+              cat > /tmp/deployment-${version}.yaml <<EOF
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: java-gradle-app
+  namespace: java-app
+  labels:
+    app: java-gradle-app
+    version: ${version}
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: java-gradle-app
+  template:
+    metadata:
+      labels:
+        app: java-gradle-app
+        version: ${version}
+    spec:
+      containers:
+      - name: java-app
+        image: ${imageTag}
+        ports:
+        - containerPort: 8080
+        envFrom:
+        - configMapRef:
+            name: app-config
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "512Mi"
+          limits:
+            cpu: "1000m"
+            memory: "1Gi"
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+        imagePullPolicy: Always
+EOF
+              
+              kubectl apply -f /tmp/deployment-${version}.yaml
+              
+              # Wait for rollout with comprehensive debugging
+              echo "⏳ Waiting for rollout to complete (timeout: 10 minutes)..."
+              if kubectl rollout status deployment/java-gradle-app -n java-app --timeout=600s; then
+                echo "✅ Rollout completed successfully"
               else
-                kubectl set image deployment/java-gradle-app java-app=${GAR_IMAGE_V2} -n java-app --record
+                echo "❌ Rollout failed or timed out. Debugging information:"
+                echo "=== Deployment Details ==="
+                kubectl describe deployment java-gradle-app -n java-app
+                echo "=== Pod Status ==="
+                kubectl get pods -n java-app -o wide
+                echo "=== ReplicaSet Status ==="
+                kubectl get replicaset -n java-app -o wide
+                echo "=== Pod Logs (first container each pod) ==="
+                for POD in \$(kubectl get pods -l app=java-gradle-app -n java-app -o name); do
+                  echo "--- Logs for \${POD} ---"
+                  kubectl logs \${POD} -n java-app --tail=50 || echo "No logs available"
+                done
+                echo "=== Events ==="
+                kubectl get events -n java-app --sort-by=.lastTimestamp | tail -30
+                exit 1
               fi
+              
             else
               echo "🔄 EXECUTING: Rolling back"
-              kubectl rollout undo deployment/java-gradle-app -n java-app
+              if kubectl rollout undo deployment/java-gradle-app -n java-app; then
+                kubectl rollout status deployment/java-gradle-app -n java-app --timeout=300s
+                echo "✅ Rollback completed successfully"
+              else
+                echo "❌ Rollback failed"
+                exit 1
+              fi
             fi
-            
-            kubectl rollout status deployment/java-gradle-app -n java-app --timeout=300s
           """
         }
       }
     }
 
-    stage('Verify and Display Results') {
+    stage('Verify Deployment') {
       steps {
         sh '''
           export PATH="${WORKSPACE}/bin:${PATH}"
           export KUBECONFIG=${KUBECONFIG}
           
-          echo "=== DEPLOYMENT STATUS ==="
-          kubectl get deployments,pods,svc -n java-app
+          echo "=== DEPLOYMENT VERIFICATION ==="
+          echo "📊 Deployment Status:"
+          kubectl get deployment java-gradle-app -n java-app -o wide
+          
+          echo "📦 Pod Status:"
+          kubectl get pods -l app=java-gradle-app -n java-app -o wide
+          
+          echo "🔍 ReplicaSet Status:"
+          kubectl get replicaset -l app=java-gradle-app -n java-app -o wide
+          
+          # Get service and ingress information
+          echo "🌐 Service Details:"
+          kubectl get service java-gradle-service -n java-app -o wide
+          
+          echo "🔗 Ingress Details:"
+          kubectl get ingress java-app-ingress -n java-app -o wide
           
           IP=$(kubectl get ingress java-app-ingress -n java-app -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "Pending")
           echo "🌐 Application URL: http://$IP"
           
-          if [ "$IP" != "Pending" ]; then
-            echo "📄 Testing HTML differences..."
-            curl -s http://$IP | grep -o "Version [0-9]\\.[0-9] - [A-Z]*" || echo "Unable to fetch version"
+          # Test application if IP is available
+          if [ "$IP" != "Pending" ] && [ ! -z "$IP" ]; then
+            echo "🧪 Testing application endpoint..."
+            for i in {1..10}; do
+              if curl -s --connect-timeout 5 http://$IP > /dev/null; then
+                echo "✅ Application is responding"
+                echo "📄 Application content:"
+                curl -s http://$IP | grep -o "Version [0-9]\\.[0-9] - [A-Z]*" | head -1 || echo "Content check failed"
+                break
+              else
+                echo "⏳ Waiting for application to be ready... (attempt $i/10)"
+                sleep 10
+              fi
+            done
+          else
+            echo "⚠️  IP address not yet available. Ingress may still be provisioning."
           fi
         '''
       }
@@ -193,22 +334,36 @@ EOF
   post {
     always {
       script {
+        def currentResult = currentBuild.result ?: 'SUCCESS'
         sh """
           echo "=== PIPELINE EXECUTION SUMMARY ==="
           echo "Action Requested: ${params.DEPLOYMENT_ACTION}"
           echo "Version Selected: ${params.VERSION}"
           echo "Build Number: ${BUILD_NUMBER}"
-          echo "Status: SUCCESS"
+          echo "Status: ${currentResult}"
         """
+        
+        // Clean up temporary files
+        sh '''
+          rm -f /tmp/deployment-v1.0.yaml /tmp/deployment-v2.0.yaml 2>/dev/null || true
+        '''
+      }
+    }
+    success {
+      script {
+        echo "🎉 Pipeline executed successfully!"
+        echo "Deployment action '${params.DEPLOYMENT_ACTION}' for version '${params.VERSION}' completed."
       }
     }
     failure {
       script {
-        sh """
-          echo "❌ PIPELINE FAILED"
-          echo "Failed during: ${params.DEPLOYMENT_ACTION} for version: ${params.VERSION}"
-          echo "Check the logs above for error details"
-        """
+        echo "❌ Pipeline failed during '${params.DEPLOYMENT_ACTION}' for version '${params.VERSION}'"
+        echo "Check the detailed logs above for troubleshooting information."
+      }
+    }
+    unstable {
+      script {
+        echo "⚠️ Pipeline marked as unstable"
       }
     }
   }
