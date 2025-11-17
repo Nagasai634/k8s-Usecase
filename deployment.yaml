@@ -1,0 +1,42 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: java-gradle-deployment
+  namespace: java-gradle-ns
+  labels:
+    app: java-gradle
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: java-gradle
+  template:
+    metadata:
+      labels:
+        app: java-gradle
+    spec:
+      containers:
+      - name: java-gradle
+        image: IMAGE_URI                    # <-- replace with e.g. us-central1-docker.pkg.dev/PROJECT_ID/REPO/java-gradle:v1
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8080
+          name: http
+        env:
+        - name: APP_MESSAGE
+          valueFrom:
+            configMapKeyRef:
+              name: java-gradle-config
+              key: APP_MESSAGE
+        livenessProbe:
+          httpGet:
+            path: /actuator/health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 5

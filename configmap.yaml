@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: java-gradle-config
+  namespace: java-gradle-ns
+data:
+  APP_MESSAGE: "Welcome — only allowed IPs can see this page!"
+  ENV: "prod"
