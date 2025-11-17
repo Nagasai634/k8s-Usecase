@@ -9,7 +9,7 @@ pipeline {
     IMAGE_TAG = "${env.BUILD_NUMBER ?: 'manual'}"
     GAR_HOST = "${env.REGION}-docker.pkg.dev"
     GAR_IMAGE = "${env.GAR_HOST}/${env.PROJECT_ID}/${env.GAR_REPO}/${env.IMAGE_NAME}:${env.IMAGE_TAG}"
-    CLUSTER_NAME = "my-autopilot-cluster"
+    CLUSTER_NAME = "autopilot-demo"
   }
 
   stages {
@@ -74,7 +74,7 @@ pipeline {
     stage('Build & Push Docker image') {
       steps {
         sh '''
-          cd k8s-Usecase/java-gradle
+          cd /var/lib/jenkins/workspace/first-job/k8s-Usecase/java-gradle
           echo "Building Docker image: ${GAR_IMAGE}"
           docker build -t ${GAR_IMAGE} .
           docker push ${GAR_IMAGE}

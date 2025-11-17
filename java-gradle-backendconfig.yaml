@@ -1,8 +1,0 @@
-apiVersion: cloud.google.com/v1
-kind: BackendConfig
-metadata:
-  name: java-gradle-backendconfig
-  namespace: java-gradle-ns
-spec:
-  securityPolicy:
-    name: java-gradle-cloud-armor-policy
