@@ -1,10 +1,17 @@
 apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: app-config
-  namespace: java-app
-data:
-  app.name: "Java Gradle Application"
-  app.version: "v1.0"
-  app.color: "blue"
-  welcome.message: "Welcome to our application - Version 1.0"
+kind: Config
+current-context: ${CLUSTER_NAME}
+contexts:
+- context:
+    cluster: ${CLUSTER_NAME}
+    user: ${CLUSTER_NAME}
+  name: ${CLUSTER_NAME}
+clusters:
+- cluster:
+    certificate-authority-data: ${CLUSTER_CA}
+    server: https://${CLUSTER_ENDPOINT}
+  name: ${CLUSTER_NAME}
+users:
+- name: ${CLUSTER_NAME}
+  user:
+    token: ${TOKEN}
