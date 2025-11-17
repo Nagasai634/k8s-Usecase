@@ -1,0 +1,27 @@
+# Cloud Armor security policy import format.
+# Replace ALLOWED_IP_CIDR with your allowed IP or CIDR, e.g. "1.2.3.4/32"
+# Then import with:
+# gcloud compute security-policies import java-gradle-cloud-armor-policy --source=cloudarmor-policy.yaml --global
+name: java-gradle-cloud-armor-policy
+description: "Allow only ALLOWED_IP_CIDR to access java-gradle"
+rules:
+  - priority: 1000
+    match:
+      versionedExpr: SRC_IPS_V1
+      config:
+        # list of allowed source IPs/CIDRs
+        srcIpRanges:
+          - "ALLOWED_IP_CIDR"
+    action: "allow"
+    description: "Allow specific client IP(s)"
+
+  # default deny all others
+  - priority: 2147483647
+    match:
+      versionedExpr: SRC_IPS_V1
+      config:
+        # wildcard for all IPs
+        srcIpRanges:
+          - "0.0.0.0/0"
+    action: "deny(403)"
+    description: "Default deny all others"
