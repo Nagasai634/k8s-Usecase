@@ -1,42 +1,52 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: java-gradle-deployment
-  namespace: java-gradle-ns
+  name: java-gradle-app
+  namespace: java-app
   labels:
-    app: java-gradle
+    app: java-gradle-app
 spec:
-  replicas: 3
+  replicas: 2
   selector:
     matchLabels:
-      app: java-gradle
+      app: java-gradle-app
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
   template:
     metadata:
       labels:
-        app: java-gradle
+        app: java-gradle-app
     spec:
       containers:
-      - name: java-gradle
-        image: IMAGE_URI                    # <-- replace with e.g. us-central1-docker.pkg.dev/PROJECT_ID/REPO/java-gradle:v1
-        imagePullPolicy: IfNotPresent
+      - name: java-app
+        image: us-central1-docker.pkg.dev/planar-door-476510-m1/java-app/java-app:latest
         ports:
         - containerPort: 8080
-          name: http
         env:
-        - name: APP_MESSAGE
+        - name: SPRING_PROFILES_ACTIVE
           valueFrom:
             configMapKeyRef:
-              name: java-gradle-config
-              key: APP_MESSAGE
-        livenessProbe:
+              name: app-config
+              key: spring.profiles.active
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        readinessProbe:
           httpGet:
             path: /actuator/health
             port: 8080
           initialDelaySeconds: 30
           periodSeconds: 10
-        readinessProbe:
+        livenessProbe:
           httpGet:
-            path: /
+            path: /actuator/health
             port: 8080
-          initialDelaySeconds: 5
-          periodSeconds: 5
+          initialDelaySeconds: 45
+          periodSeconds: 20

@@ -2,109 +2,138 @@ pipeline {
   agent any
 
   environment {
-    // Replace these with values for your project
-    PROJECT_ID      = "planar-door-476510-m1"
-    REGION          = "us-central1"                     // Artifact Registry region and cluster region
-    REPO            = "java-gradle-app"                         // Artifact Registry repo name
-    IMAGE_NAME      = "java-app:v1"                     // image name     
-    K8S_DIR         = "k8s-Usecase"                             // directory with manifests
-    IMAGE_PLACEHOLDER = "IMAGE_PLACEHOLDER"             // placeholder text in k8s manifests
-    DEPLOYMENT_NAME = "java-gradle-deployment"           // k8s deployment to wait for
-    FULL_IMAGE      = "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO}/${IMAGE_NAME}"
+    PROJECT_ID = 'planar-door-476510-m1'
+    REGION = 'us-central1'
+    GAR_REPO = 'java-app'
+    IMAGE_NAME = "java-app"
+    IMAGE_TAG = "${env.BUILD_NUMBER ?: 'manual'}"
+    GAR_HOST = "${env.REGION}-docker.pkg.dev"
+    GAR_IMAGE = "${env.GAR_HOST}/${env.PROJECT_ID}/${env.GAR_REPO}/${env.IMAGE_NAME}:${env.IMAGE_TAG}"
+    CLUSTER_NAME = "my-autopilot-cluster"
   }
 
   stages {
-    stage('Checkout') {
+    stage('Checkout and Setup') {
       steps {
-        checkout scm
-        dir('/var/lib/jenkins/firstjob/java-gradle'){
-          sh './gradlew clean build'
-          sh 'docker build -t ${IMAGE_NAME} .'
+        cleanWs()
+        sh '''
+          git clone https://github.com/Nagasai634/k8s-Usecase.git
+          cd k8s-Usecase
+          ls -la
+          pwd
+        '''
+      }
+    }
+
+    stage('Fix Permissions') {
+      steps {
+        sh '''
+          echo "=== Fixing Permissions ==="
+          cd k8s-Usecase/java-gradle
+          pwd
+          ls -la
+          chmod 755 ./gradlew
+          ls -la gradlew
+          chown -R jenkins:jenkins /var/lib/jenkins/workspace/first-job/k8s-Usecase/ || true
+        '''
+      }
+    }
+
+    stage('Setup gcloud') {
+      steps {
+        withCredentials([file(credentialsId: 'gcp-service-account-key', variable: 'GCP_SA_KEYFILE')]) {
+          sh '''
+            # Authenticate gcloud
+            gcloud auth activate-service-account --key-file="$GCP_SA_KEYFILE"
+            gcloud config set project ${PROJECT_ID}
+            
+            # Enable required APIs
+            gcloud services enable container.googleapis.com artifactregistry.googleapis.com cloudresourcemanager.googleapis.com --quiet || true
+            
+            # Configure docker auth
+            gcloud auth configure-docker ${GAR_HOST} --quiet
+          '''
         }
       }
     }
 
-    stage('Build & Push Container Image') {
+    stage('Build (Gradle)') {
       steps {
-        // Use google/cloud-sdk for gcloud + docker auth
-        withCredentials([file(credentialsId: 'GCP_SA_KEY', variable: 'GCP_KEY_FILE')]) {
-          script {
-            docker.image('google/cloud-sdk:slim').inside('--entrypoint=""') {
-              sh """
-                set -e
-                # authenticate to GCP
-                gcloud auth activate-service-account --key-file=${GCP_KEY_FILE} --project=${PROJECT_ID}
-                gcloud config set project ${PROJECT_ID}
-                gcloud --quiet components update
-
-                # ensure Artifact Registry repo exists (idempotent; ignore error if already exists)
-                gcloud artifacts repositories create ${REPO} --repository-format=docker --location=${REGION} || echo "repo may already exist"
-
-                # configure docker to authenticate to Artifact Registry
-                gcloud auth configure-docker ${REGION}-docker.pkg.dev -q
-
-                # push
-                docker push ${FULL_IMAGE}
-              """
-            }
-          }
-        }
+        sh '''
+          cd k8s-Usecase/java-gradle
+          echo "Current directory: $(pwd)"
+          echo "Java version:"
+          java -version
+          echo "Gradle wrapper permissions:"
+          ls -la gradlew
+          ./gradlew clean build --no-daemon --stacktrace
+        '''
       }
     }
 
-    stage('Update Manifests') {
+    stage('Build & Push Docker image') {
       steps {
-        // Replace IMAGE_PLACEHOLDER in all YAMLs in K8S_DIR. If you prefer kubectl set image, see below.
-        sh """
-          if [ -d "${K8S_DIR}" ]; then
-            sed -i "s|${IMAGE_PLACEHOLDER}|${FULL_IMAGE}|g" ${K8S_DIR}/*.yaml || true
-            git --no-pager diff -- ${K8S_DIR} || true
-          else
-            echo "K8S dir ${K8S_DIR} not found; skipping manifest update"
-          fi
-        """
+        sh '''
+          cd k8s-Usecase/java-gradle
+          echo "Building Docker image: ${GAR_IMAGE}"
+          docker build -t ${GAR_IMAGE} .
+          docker push ${GAR_IMAGE}
+        '''
       }
     }
 
     stage('Deploy to GKE') {
       steps {
-        withCredentials([file(credentialsId: 'GCP_SA_KEY', variable: 'GCP_KEY_FILE')]) {
-          script {
-            docker.image('google/cloud-sdk:slim').inside('--entrypoint=""') {
-              sh """
-                set -e
-                gcloud auth activate-service-account --key-file=${GCP_KEY_FILE} --project=${PROJECT_ID}
-                gcloud config set project ${PROJECT_ID}
+        withCredentials([file(credentialsId: 'gcp-service-account-key', variable: 'GCP_SA_KEYFILE')]) {
+          sh '''
+            # Get kubeconfig
+            gcloud container clusters get-credentials ${CLUSTER_NAME} --region ${REGION} --project ${PROJECT_ID}
 
-                # get cluster credentials (Autopilot cluster)
-                gcloud container clusters get-credentials YOUR_CLUSTER_NAME --region YOUR_CLUSTER_REGION --project=${PROJECT_ID}
+            # Create namespace if not exists
+            kubectl create namespace java-app --dry-run=client -o yaml | kubectl apply -f -
 
-                # apply manifests (or patch via kubectl set image)
-                kubectl apply -f ${K8S_DIR}/
+            # Apply all manifests
+            kubectl apply -f k8s-Usecase/k8s/ -n java-app
 
-                # wait for rollout
-                kubectl rollout status deployment/${DEPLOYMENT_NAME} --timeout=3m || kubectl rollout status deployment/${DEPLOYMENT_NAME} --timeout=5m
-              """
-            }
-          }
+            # Update deployment with new image
+            kubectl set image deployment/java-gradle-app java-app=${GAR_IMAGE} -n java-app --record
+
+            # Wait for rollout
+            kubectl rollout status deployment/java-gradle-app -n java-app --timeout=600s
+          '''
         }
       }
     }
 
-    stage('Smoke Test') {
+    stage('Verify Deployment') {
       steps {
-        // quick check - list pods & services
-        sh 'kubectl get pods,svc -o wide'
+        sh '''
+          echo "=== Deployment Verification ==="
+          kubectl get deployments -n java-app
+          kubectl get pods -n java-app -l app=java-gradle-app
+          kubectl get services -n java-app
+          kubectl get ingress -n java-app
+          kubectl get hpa -n java-app
+          
+          echo "=== Cloud Armor Policy ==="
+          kubectl get securitypolicy -n java-app
+        '''
       }
     }
   }
 
   post {
-    failure {
-      echo "Build or deploy failed. Check console output."
+    always {
+      sh '''
+        echo "=== Cleaning up ==="
+        docker system prune -f || true
+      '''
     }
-    success {
-      echo "Deployment completed: ${FULL_IMAGE}"
+    failure {
+      sh '''
+        echo "=== Build Failed - Attempting Rollback ==="
+        kubectl rollout undo deployment/java-gradle-app -n java-app --timeout=300s || true
+      '''
     }
   }
 }

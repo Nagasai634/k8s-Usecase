@@ -1,0 +1,18 @@
+apiVersion: networking.gke.io/v1beta1
+kind: SecurityPolicy
+metadata:
+  name: java-app-security-policy
+spec:
+  description: "Restrict access to specific IP addresses"
+  defaultRule:
+    action: "deny(403)"
+  rules:
+  - action: "allow"
+    priority: 1000
+    match:
+      versionedExpr: "SRC_IPS_V1"
+      config:
+        srcIpRanges:
+        - "35.235.241.17/32"  # Your current IP
+        - "0.0.0.0/0"         # Temporary - remove after testing
+    description: "Allow specific IP addresses"

@@ -1,15 +1,14 @@
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: java-gradle-ingress
-  namespace: java-gradle-ns
+  name: java-app-ingress
+  namespace: java-app
   annotations:
     kubernetes.io/ingress.class: "gce"
-    # Optional: use a reserved static IP if you reserved one:
-    # kubernetes.io/ingress.global-static-ip-name: "java-gradle-ip"
+    networking.gke.io/v1beta1.FrontendConfig: "cloud-armor-config"
 spec:
   defaultBackend:
     service:
-      name: java-gradle-svc
+      name: java-gradle-service
       port:
         number: 80
