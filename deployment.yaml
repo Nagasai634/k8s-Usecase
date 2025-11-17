@@ -2,6 +2,8 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: java-gradle-app
+  labels:
+    app: java-gradle-app
 spec:
   replicas: 3
   selector:
@@ -14,24 +16,28 @@ spec:
     spec:
       containers:
       - name: java-app
-        image: us-central1-docker.pkg.dev/planar-door-476510-m1/java-app/java-app:latest
+        image: PLACEHOLDER_IMAGE  # This will be replaced by the pipeline
         ports:
         - containerPort: 8080
         envFrom:
         - configMapRef:
-            name: java-app-config
-        # Add these probes
+            name: app-config
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "512Mi"
+          limits:
+            cpu: "1000m"
+            memory: "1Gi"
         livenessProbe:
           httpGet:
-            path: /  # or /health if you have a health endpoint
+            path: /
             port: 8080
           initialDelaySeconds: 30
           periodSeconds: 10
-          timeoutSeconds: 5
         readinessProbe:
           httpGet:
-            path: /  # or /health if you have a health endpoint
+            path: /
             port: 8080
           initialDelaySeconds: 5
           periodSeconds: 5
-          timeoutSeconds: 3
