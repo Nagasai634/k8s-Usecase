@@ -91,6 +91,7 @@ pipeline {
         withCredentials([file(credentialsId: 'gcp-service-account-key', variable: 'GCP_SA_KEYFILE')]) {
           sh '''
             export PATH="${WORKSPACE}/bin:${PATH}"
+            export KUBECONFIG=${KUBECONFIG}  # Explicitly export for safety
             gcloud auth activate-service-account --key-file="$GCP_SA_KEYFILE"
             gcloud config set project ${PROJECT_ID}
             
@@ -101,9 +102,9 @@ pipeline {
             # Get access token
             TOKEN=$(gcloud auth print-access-token)
             
-            # Create kubeconfig with proper YAML
+            # Create kubeconfig with proper YAML (indentation removed for reliability)
             mkdir -p ${WORKSPACE}/.kube
-            cat <<EOF > ${KUBECONFIG}
+            cat > ${KUBECONFIG} <<EOF
 apiVersion: v1
 kind: Config
 current-context: ${CLUSTER_NAME}
@@ -128,7 +129,7 @@ EOF
               echo "ERROR: Kubeconfig validation failed"
               exit 1
             fi
-            echo "✅ Kubeconfig created and validated"
+            echo "Kubeconfig created and validated"
           '''
         }
       }
@@ -143,14 +144,14 @@ EOF
           export PATH="${WORKSPACE}/bin:${PATH}"
           export KUBECONFIG=${KUBECONFIG}
           
-          echo "🧹 Cleaning up existing deployment resources..."
+          echo " Cleaning up existing deployment resources..."
           
           # Delete existing deployment and replicasets
           kubectl delete deployment java-gradle-app -n java-app --ignore-not-found=true --timeout=30s
           kubectl delete replicaset -l app=java-gradle-app -n java-app --ignore-not-found=true --timeout=30s
           
           # Wait for cleanup to complete
-          echo "⏳ Waiting for resources to be cleaned up..."
+          echo " Waiting for resources to be cleaned up..."
           sleep 20
           
           # Verify cleanup
@@ -165,8 +166,8 @@ EOF
           def action = params.DEPLOYMENT_ACTION
           def version = params.VERSION
           
-          echo "🎯 USER REQUESTED ACTION: ${action}"
-          echo "🎯 SELECTED VERSION: ${version}"
+          echo "USER REQUESTED ACTION: ${action}"
+          echo "SELECTED VERSION: ${version}"
           
           // Determine the image tag in Groovy to avoid interpolation issues
           def imageTag
@@ -181,77 +182,25 @@ EOF
             export KUBECONFIG=${KUBECONFIG}
             
             if [ "${action}" = "ROLLOUT" ]; then
-              echo "🚀 EXECUTING: Rolling out ${version}"
+              echo "EXECUTING: Rolling out ${version}"
               kubectl create namespace java-app --dry-run=client -o yaml | kubectl apply -f -
               
-              echo "📦 Using image: ${imageTag}"
+              echo "Using image: ${imageTag}"
               
-              # Apply base resources
-              kubectl apply -f k8s-Usecase/configmap.yaml -f k8s-Usecase/frontend-config.yaml -f k8s-Usecase/hpa.yaml -f k8s-Usecase/ingress.yaml -f k8s-Usecase/service.yaml -n java-app --validate=false
+              # Copy static deployment.yaml from repo and replace placeholders
+              cp k8s-Usecase/deployment.yaml /tmp/deployment-${version}.yaml
+              sed -i "s|IMAGE_PLACEHOLDER|${imageTag}|g" /tmp/deployment-${version}.yaml
+              sed -i "s|VERSION_PLACEHOLDER|${version}|g" /tmp/deployment-${version}.yaml
               
-              # Create deployment with the specific image tag and health checks
-              cat > /tmp/deployment-${version}.yaml <<EOF
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: java-gradle-app
-  namespace: java-app
-  labels:
-    app: java-gradle-app
-    version: ${version}
-spec:
-  replicas: 3
-  selector:
-    matchLabels:
-      app: java-gradle-app
-  template:
-    metadata:
-      labels:
-        app: java-gradle-app
-        version: ${version}
-    spec:
-      containers:
-      - name: java-app
-        image: ${imageTag}
-        ports:
-        - containerPort: 8080
-        envFrom:
-        - configMapRef:
-            name: app-config
-        resources:
-          requests:
-            cpu: "500m"
-            memory: "512Mi"
-          limits:
-            cpu: "1000m"
-            memory: "1Gi"
-        livenessProbe:
-          httpGet:
-            path: /
-            port: 8080
-          initialDelaySeconds: 30
-          periodSeconds: 10
-          timeoutSeconds: 5
-          failureThreshold: 3
-        readinessProbe:
-          httpGet:
-            path: /
-            port: 8080
-          initialDelaySeconds: 5
-          periodSeconds: 5
-          timeoutSeconds: 3
-          failureThreshold: 3
-        imagePullPolicy: Always
-EOF
-              
-              kubectl apply -f /tmp/deployment-${version}.yaml
+              # Apply static configmap.yaml from repo and the modified deployment
+              kubectl apply -f k8s-Usecase/configmap.yaml -f /tmp/deployment-${version}.yaml -n java-app --validate=false
               
               # Wait for rollout with comprehensive debugging
-              echo "⏳ Waiting for rollout to complete (timeout: 10 minutes)..."
+              echo " Waiting for rollout to complete (timeout: 10 minutes)..."
               if kubectl rollout status deployment/java-gradle-app -n java-app --timeout=600s; then
-                echo "✅ Rollout completed successfully"
+                echo " Rollout completed successfully"
               else
-                echo "❌ Rollout failed or timed out. Debugging information:"
+                echo " Rollout failed or timed out. Debugging information:"
                 echo "=== Deployment Details ==="
                 kubectl describe deployment java-gradle-app -n java-app
                 echo "=== Pod Status ==="
@@ -269,12 +218,12 @@ EOF
               fi
               
             else
-              echo "🔄 EXECUTING: Rolling back"
+              echo "EXECUTING: Rolling back"
               if kubectl rollout undo deployment/java-gradle-app -n java-app; then
                 kubectl rollout status deployment/java-gradle-app -n java-app --timeout=300s
-                echo "✅ Rollback completed successfully"
+                echo " Rollback completed successfully"
               else
-                echo "❌ Rollback failed"
+                echo "Rollback failed"
                 exit 1
               fi
             fi
@@ -290,41 +239,41 @@ EOF
           export KUBECONFIG=${KUBECONFIG}
           
           echo "=== DEPLOYMENT VERIFICATION ==="
-          echo "📊 Deployment Status:"
+          echo " Deployment Status:"
           kubectl get deployment java-gradle-app -n java-app -o wide
           
-          echo "📦 Pod Status:"
+          echo " Pod Status:"
           kubectl get pods -l app=java-gradle-app -n java-app -o wide
           
-          echo "🔍 ReplicaSet Status:"
+          echo " ReplicaSet Status:"
           kubectl get replicaset -l app=java-gradle-app -n java-app -o wide
           
           # Get service and ingress information
-          echo "🌐 Service Details:"
+          echo " Service Details:"
           kubectl get service java-gradle-service -n java-app -o wide
           
-          echo "🔗 Ingress Details:"
+          echo " Ingress Details:"
           kubectl get ingress java-app-ingress -n java-app -o wide
           
           IP=$(kubectl get ingress java-app-ingress -n java-app -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "Pending")
-          echo "🌐 Application URL: http://$IP"
+          echo " Application URL: http://$IP"
           
           # Test application if IP is available
           if [ "$IP" != "Pending" ] && [ ! -z "$IP" ]; then
-            echo "🧪 Testing application endpoint..."
+            echo " Testing application endpoint..."
             for i in {1..10}; do
               if curl -s --connect-timeout 5 http://$IP > /dev/null; then
-                echo "✅ Application is responding"
-                echo "📄 Application content:"
+                echo " Application is responding"
+                echo "Application content:"
                 curl -s http://$IP | grep -o "Version [0-9]\\.[0-9] - [A-Z]*" | head -1 || echo "Content check failed"
                 break
               else
-                echo "⏳ Waiting for application to be ready... (attempt $i/10)"
+                echo " Waiting for application to be ready... (attempt $i/10)"
                 sleep 10
               fi
             done
           else
-            echo "⚠️  IP address not yet available. Ingress may still be provisioning."
+            echo " IP address not yet available. Ingress may still be provisioning."
           fi
         '''
       }
@@ -351,19 +300,19 @@ EOF
     }
     success {
       script {
-        echo "🎉 Pipeline executed successfully!"
+        echo " Pipeline executed successfully!"
         echo "Deployment action '${params.DEPLOYMENT_ACTION}' for version '${params.VERSION}' completed."
       }
     }
     failure {
       script {
-        echo "❌ Pipeline failed during '${params.DEPLOYMENT_ACTION}' for version '${params.VERSION}'"
+        echo " Pipeline failed during '${params.DEPLOYMENT_ACTION}' for version '${params.VERSION}'"
         echo "Check the detailed logs above for troubleshooting information."
       }
     }
     unstable {
       script {
-        echo "⚠️ Pipeline marked as unstable"
+        echo " Pipeline marked as unstable"
       }
     }
   }
