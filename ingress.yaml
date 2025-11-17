@@ -5,10 +5,15 @@ metadata:
   namespace: java-app
   annotations:
     kubernetes.io/ingress.class: "gce"
-    networking.gke.io/v1beta1.FrontendConfig: "cloud-armor-config"
+    nginx.ingress.kubernetes.io/rewrite-target: /
 spec:
-  defaultBackend:
-    service:
-      name: java-gradle-service
-      port:
-        number: 80
+  rules:
+  - http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: java-gradle-service
+            port:
+              number: 80

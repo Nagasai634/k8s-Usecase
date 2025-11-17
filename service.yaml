@@ -3,6 +3,8 @@ kind: Service
 metadata:
   name: java-gradle-service
   namespace: java-app
+  labels:
+    app: java-gradle-app
 spec:
   selector:
     app: java-gradle-app
