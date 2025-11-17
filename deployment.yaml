@@ -2,8 +2,10 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: java-gradle-app
+  namespace: java-app
   labels:
     app: java-gradle-app
+    version: ${version}
 spec:
   replicas: 3
   selector:
@@ -13,10 +15,11 @@ spec:
     metadata:
       labels:
         app: java-gradle-app
+        version: ${version}
     spec:
       containers:
       - name: java-app
-        image: PLACEHOLDER_IMAGE  # This will be replaced by the pipeline
+        image: ${imageTag}
         ports:
         - containerPort: 8080
         envFrom:
@@ -35,9 +38,14 @@ spec:
             port: 8080
           initialDelaySeconds: 30
           periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
         readinessProbe:
           httpGet:
             path: /
             port: 8080
           initialDelaySeconds: 5
           periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+        imagePullPolicy: Always
