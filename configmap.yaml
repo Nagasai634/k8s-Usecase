@@ -1,17 +1,11 @@
 apiVersion: v1
-kind: Config
-current-context: ${CLUSTER_NAME}
-contexts:
-- context:
-    cluster: ${CLUSTER_NAME}
-    user: ${CLUSTER_NAME}
-  name: ${CLUSTER_NAME}
-clusters:
-- cluster:
-    certificate-authority-data: ${CLUSTER_CA}
-    server: https://${CLUSTER_ENDPOINT}
-  name: ${CLUSTER_NAME}
-users:
-- name: ${CLUSTER_NAME}
-  user:
-    token: ${TOKEN}
+kind: ConfigMap
+metadata:
+  name: app-config
+  namespace: java-app
+data:
+  # Example key-value pairs (adjust for your app)
+  app.version: "1.0"
+  app.message: "Hello from ConfigMap"
+  # Add more as needed, e.g.:
+  # database.url: "jdbc:mysql://db:3306/myapp"

@@ -5,7 +5,7 @@ metadata:
   namespace: java-app
   labels:
     app: java-gradle-app
-    version: ${version}
+    version: VERSION_PLACEHOLDER
 spec:
   replicas: 3
   selector:
@@ -15,11 +15,11 @@ spec:
     metadata:
       labels:
         app: java-gradle-app
-        version: ${version}
+        version: VERSION_PLACEHOLDER
     spec:
       containers:
       - name: java-app
-        image: ${imageTag}
+        image: IMAGE_PLACEHOLDER
         ports:
         - containerPort: 8080
         envFrom:
