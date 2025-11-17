@@ -18,6 +18,9 @@ pipeline {
     stage('Checkout') {
       steps {
         checkout scm
+        dir('/var/lib/jenkins/firstjob/java-gradle'){
+          sh './gradlew clean build'
+        }
       }
     }
 
