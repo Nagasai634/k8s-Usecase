@@ -9,7 +9,8 @@ pipeline {
     IMAGE_TAG = "${env.BUILD_NUMBER ?: 'manual'}"
     GAR_HOST = "${env.REGION}-docker.pkg.dev"
     GAR_IMAGE = "${env.GAR_HOST}/${env.PROJECT_ID}/${env.GAR_REPO}/${env.IMAGE_NAME}:${env.IMAGE_TAG}"
-    CLUSTER_NAME = "my-autopilot-cluster"
+    CLUSTER_NAME = "autopilot-demo"
+    KUBECONFIG = "${env.WORKSPACE}/.kube/config"
   }
 
   stages {
@@ -24,18 +25,24 @@ pipeline {
       }
     }
 
-    stage('Install Required Tools') {
+    stage('Install Required Tools (No Sudo)') {
       steps {
         sh '''
-          echo "=== Installing Required Tools ==="
-          # Install kubectl
-          curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-          sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
-          kubectl version --client
+          echo "=== Installing Required Tools Without Sudo ==="
           
-          # Install docker if not present
-          which docker || (sudo apt-get update && sudo apt-get install -y docker.io)
-          sudo usermod -aG docker jenkins || true
+          # Install kubectl to local workspace (no sudo required)
+          mkdir -p ${WORKSPACE}/bin
+          curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          chmod +x ./kubectl
+          mv ./kubectl ${WORKSPACE}/bin/
+          export PATH="${WORKSPACE}/bin:${PATH}"
+          
+          # Verify kubectl installation
+          ${WORKSPACE}/bin/kubectl version --client
+          
+          # Check if docker is available
+          which docker || echo "Docker might need setup"
+          docker --version || echo "Docker not available"
         '''
       }
     }
@@ -45,7 +52,7 @@ pipeline {
         sh '''
           echo "=== Fixing Permissions ==="
           cd k8s-Usecase/java-gradle
-          chmod 755 ./gradlew
+          chmod +x ./gradlew
           ls -la gradlew
         '''
       }
@@ -63,11 +70,12 @@ pipeline {
             gcloud services enable container.googleapis.com artifactregistry.googleapis.com cloudresourcemanager.googleapis.com --quiet
             
             # Create Artifact Registry repository if it doesn't exist
-            gcloud artifacts repositories describe ${GAR_REPO} --location=${REGION} || \
-            gcloud artifacts repositories create ${GAR_REPO} \
-              --repository-format=docker \
-              --location=${REGION} \
-              --description="Docker repository for Java application"
+            if ! gcloud artifacts repositories describe ${GAR_REPO} --location=${REGION}; then
+              gcloud artifacts repositories create ${GAR_REPO} \
+                --repository-format=docker \
+                --location=${REGION} \
+                --description="Docker repository for Java application"
+            fi
             
             # Configure docker auth
             gcloud auth configure-docker ${GAR_HOST} --quiet
@@ -107,12 +115,15 @@ pipeline {
       steps {
         withCredentials([file(credentialsId: 'gcp-service-account-key', variable: 'GCP_SA_KEYFILE')]) {
           sh '''
+            # Set PATH to include our local kubectl
+            export PATH="${WORKSPACE}/bin:${PATH}"
+            
             # Get kubeconfig for the cluster
             gcloud container clusters get-credentials ${CLUSTER_NAME} --region ${REGION} --project ${PROJECT_ID}
             
             # Verify cluster access
-            kubectl cluster-info
-            kubectl get nodes
+            ${WORKSPACE}/bin/kubectl cluster-info
+            ${WORKSPACE}/bin/kubectl get nodes
           '''
         }
       }
@@ -122,18 +133,19 @@ pipeline {
       steps {
         sh '''
           echo "=== Deploying to GKE ==="
+          export PATH="${WORKSPACE}/bin:${PATH}"
           
           # Create namespace if not exists
-          kubectl create namespace java-app --dry-run=client -o yaml | kubectl apply -f -
+          ${WORKSPACE}/bin/kubectl create namespace java-app --dry-run=client -o yaml | ${WORKSPACE}/bin/kubectl apply -f -
           
           # Apply all Kubernetes manifests
-          kubectl apply -f k8s-Usecase/k8s/ -n java-app
+          ${WORKSPACE}/bin/kubectl apply -f k8s-Usecase/k8s/ -n java-app
           
           # Update deployment with new image
-          kubectl set image deployment/java-gradle-app java-app=${GAR_IMAGE} -n java-app --record
+          ${WORKSPACE}/bin/kubectl set image deployment/java-gradle-app java-app=${GAR_IMAGE} -n java-app --record
           
           # Wait for rollout
-          kubectl rollout status deployment/java-gradle-app -n java-app --timeout=600s
+          ${WORKSPACE}/bin/kubectl rollout status deployment/java-gradle-app -n java-app --timeout=600s
           
           echo "Deployment completed successfully"
         '''
@@ -144,11 +156,12 @@ pipeline {
       steps {
         sh '''
           echo "=== Deployment Verification ==="
-          kubectl get deployments,svc,pods,hpa,ingress -n java-app
+          export PATH="${WORKSPACE}/bin:${PATH}"
+          ${WORKSPACE}/bin/kubectl get deployments,svc,pods,hpa,ingress -n java-app
           
           # Get the external IP
           echo "=== Load Balancer IP ==="
-          kubectl get ingress -n java-app -o jsonpath='{.items[0].status.loadBalancer.ingress[0].ip}' || echo "IP not yet assigned"
+          ${WORKSPACE}/bin/kubectl get ingress -n java-app -o jsonpath='{.items[0].status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "IP not yet assigned - may take a few minutes"
         '''
       }
     }
@@ -157,17 +170,22 @@ pipeline {
   post {
     always {
       sh '''
-        echo "=== Cleaning up ==="
-        docker system prune -f || true
+        echo "=== Build Completed ==="
+        echo "Workspace: ${WORKSPACE}"
+        ls -la ${WORKSPACE}/bin/ 2>/dev/null || echo "No bin directory"
       '''
     }
     failure {
       sh '''
         echo "=== Build Failed ==="
-        # Don't attempt rollback if deployment didn't happen
-        kubectl get deployment java-gradle-app -n java-app && \
-        kubectl rollout undo deployment/java-gradle-app -n java-app --timeout=300s || \
-        echo "No deployment to rollback"
+        export PATH="${WORKSPACE}/bin:${PATH}"
+        # Attempt rollback only if deployment exists
+        if ${WORKSPACE}/bin/kubectl get deployment java-gradle-app -n java-app 2>/dev/null; then
+          echo "Attempting rollback..."
+          ${WORKSPACE}/bin/kubectl rollout undo deployment/java-gradle-app -n java-app --timeout=300s
+        else
+          echo "No deployment to rollback"
+        fi
       '''
     }
   }
