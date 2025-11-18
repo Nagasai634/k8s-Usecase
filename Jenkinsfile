@@ -46,9 +46,7 @@ pipeline {
 
   stages {
     stage('Checkout Repo') {
-      steps {
-        checkout scm
-      }
+      steps { checkout scm }
     }
 
     stage('Ensure Tools') {
@@ -124,12 +122,16 @@ EOF
             export GOOGLE_APPLICATION_CREDENTIALS="${GCP_SA_KEYFILE}"
             gcloud auth activate-service-account --key-file="${GOOGLE_APPLICATION_CREDENTIALS}"
             gcloud config set project ${PROJECT_ID}
-            gcloud container clusters get-credentials $CLUSTER_NAME --region=$REGION --project=$PROJECT_ID --quiet
 
-            mkdir -p "$(dirname $KUBECONFIG)"
-            "$WORKSPACE_BIN/kubectl" config view --raw > "$KUBECONFIG"
-            echo "Wrote kubeconfig to $KUBECONFIG"
-            "$WORKSPACE_BIN/kubectl" --kubeconfig="$KUBECONFIG" cluster-info || true
+            # Attempt to fetch cluster credentials. If this fails, we set a flag and continue (pipeline still runs but will skip K8s ops).
+            if gcloud container clusters get-credentials ${CLUSTER_NAME} --region=${REGION} --project=${PROJECT_ID} --quiet; then
+              mkdir -p "$(dirname ${KUBECONFIG})"
+              "${WORKSPACE_BIN}/kubectl" config view --raw > "${KUBECONFIG}" || true
+              echo "Wrote kubeconfig to ${KUBECONFIG}"
+            else
+              echo "gcloud get-credentials failed. Will mark SKIP_K8S=true and continue pipeline without k8s operations."
+              echo "SKIP_K8S=true" > /tmp/jenkins_skip_k8s
+            fi
           '''
         }
       }
@@ -138,34 +140,52 @@ EOF
     stage('Verify Authentication') {
       steps {
         script {
-          def authCheck = sh(script: '''$WORKSPACE_BIN/kubectl --kubeconfig=$KUBECONFIG cluster-info 2>/dev/null | grep -q "Kubernetes control plane" && echo "AUTH_SUCCESS" || echo "AUTH_FAILED"''', returnStdout: true).trim()
-          if (authCheck == 'AUTH_FAILED') {
-            echo "WARNING: Authentication to GKE failed. Skipping Kubernetes operations. Please check service account permissions and Jenkins environment."
+          // default to skip unless we confirm kubectl works
+          env.SKIP_K8S = 'true'
+          if (fileExists('/tmp/jenkins_skip_k8s')) {
+            echo "Previous step signaled to skip K8s (get-credentials failed)."
             env.SKIP_K8S = 'true'
           } else {
-            echo "Authentication successful."
-            env.SKIP_K8S = 'false'
+            // Try a lightweight kubectl call to verify auth. Use a timeout and don't fail pipeline if not accessible.
+            def out = sh(script: """${WORKSPACE_BIN}/kubectl --kubeconfig=${KUBECONFIG} auth can-i get pods --ignore-not-found=true >/dev/null 2>&1 && echo OK || echo NO""", returnStdout: true).trim()
+            if (out == 'OK') {
+              echo "kubectl authentication appears to work."
+              env.SKIP_K8S = 'false'
+            } else {
+              echo "kubectl authentication failed (auth check returned NO). Setting SKIP_K8S=true."
+              echo "If this is unexpected, ensure the GCP service account has appropriate IAM roles (e.g. roles/container.admin or roles/container.developer) and the cluster is reachable (not private/master authorized networks blocking this agent)."
+              env.SKIP_K8S = 'true'
+            }
           }
         }
       }
     }
 
-    stage('Decide Action (first-run detection)') {
-      when {
-        expression { env.SKIP_K8S != 'true' }
-      }
+    // Decide Action must always set EFFECTIVE_ACTION/EFFECTIVE_VERSION, even if we cannot reach cluster.
+    stage('Decide Action (first-run detection / defaults)') {
       steps {
         script {
-          def exists = sh(script: '''$WORKSPACE_BIN/kubectl --kubeconfig=$KUBECONFIG -n java-app get deploy java-gradle-app --ignore-not-found=true --no-headers -o name || true''', returnStdout: true).trim()
-          boolean deployedBefore = exists != ''
-          if (!deployedBefore) {
-            env.EFFECTIVE_ACTION = 'ROLLOUT'
-            env.EFFECTIVE_VERSION = 'v1.0'
-            echo "FIRST RUN -> forcing ROLLOUT of v1.0"
+          env.EFFECTIVE_ACTION = ''
+          env.EFFECTIVE_VERSION = ''
+
+          if (env.SKIP_K8S == 'false') {
+            echo "Attempting first-run detection against cluster..."
+            def exists = sh(script: """${WORKSPACE_BIN}/kubectl --kubeconfig=${KUBECONFIG} -n java-app get deploy java-gradle-app --ignore-not-found=true --no-headers -o name || true""", returnStdout: true).trim()
+            boolean deployedBefore = exists != ''
+            if (!deployedBefore) {
+              echo "No existing deployment found -> forcing ROLLOUT of v1.0"
+              env.EFFECTIVE_ACTION = 'ROLLOUT'
+              env.EFFECTIVE_VERSION = 'v1.0'
+            } else {
+              env.EFFECTIVE_ACTION = params.DEPLOYMENT_ACTION
+              env.EFFECTIVE_VERSION = params.VERSION
+              echo "Using requested parameters"
+            }
           } else {
-            env.EFFECTIVE_ACTION = params.DEPLOYMENT_ACTION
-            env.EFFECTIVE_VERSION = params.VERSION
-            echo "Using requested parameters"
+            // Can't inspect cluster — fall back to supplied parameters or safe defaults.
+            echo "Cluster unreachable. Falling back to provided parameters (or defaults)."
+            env.EFFECTIVE_ACTION = params.DEPLOYMENT_ACTION ?: 'ROLLOUT'
+            env.EFFECTIVE_VERSION = params.VERSION ?: 'v1.0'
           }
           echo "EFFECTIVE_ACTION=${env.EFFECTIVE_ACTION}"
           echo "EFFECTIVE_VERSION=${env.EFFECTIVE_VERSION}"
@@ -174,9 +194,7 @@ EOF
     }
 
     stage('Check CPU Quota & Decide SAFE Mode') {
-      when {
-        expression { env.SKIP_K8S != 'true' }
-      }
+      when { expression { env.SKIP_K8S != 'true' } }
       steps {
         withCredentials([file(credentialsId: 'gcp-service-account-key', variable: 'GCP_SA_KEYFILE')]) {
           sh '''
@@ -224,14 +242,12 @@ PY
     }
 
     stage('Apply base manifests') {
-      when {
-        expression { env.SKIP_K8S != 'true' }
-      }
+      when { expression { env.SKIP_K8S != 'true' } }
       steps {
         sh '''
           set -e
-          export KUBECONFIG="$KUBECONFIG"
-          KUBECTL="$WORKSPACE_BIN/kubectl"
+          export KUBECONFIG="${KUBECONFIG}"
+          KUBECTL="${WORKSPACE_BIN}/kubectl"
 
           ${KUBECTL} create namespace java-app --dry-run=client -o yaml | ${KUBECTL} apply -f - --validate=false || echo "Namespace creation skipped/failed"
           ${KUBECTL} apply -f k8s-Usecase/configmap.yaml -n java-app --validate=false || true
@@ -243,39 +259,34 @@ PY
     }
 
     stage('Perform Action (Rollout / Rollback)') {
-      when {
-        expression { env.SKIP_K8S != 'true' }
-      }
+      when { expression { env.SKIP_K8S != 'true' } }
       steps {
         script {
-          // read safe-mode decision
           def safeFlag = sh(script: """cat /tmp/decide_mode 2>/dev/null || echo 'USE_SAFE=1'; grep -o 'USE_SAFE=[01]' /tmp/decide_mode 2>/dev/null || echo 'USE_SAFE=1'""", returnStdout: true).trim()
           boolean safeMode = safeFlag.contains('USE_SAFE=1')
-
           def imageToUse = (env.EFFECTIVE_VERSION == 'v1.0') ? env.GAR_IMAGE_V1 : env.GAR_IMAGE_V2
-          def cidr = params.ALLOWED_IP_CIDR ?: env.ALLOWED_IP_CIDR
 
           if (env.EFFECTIVE_ACTION == 'ROLLOUT') {
             echo "ROLLOUT image=${imageToUse} safeMode=${safeMode}"
 
             sh """
               set -e
-              export KUBECONFIG="$KUBECONFIG"
-              KUBECTL="$WORKSPACE_BIN/kubectl"
+              export KUBECONFIG="${KUBECONFIG}"
+              KUBECTL="${WORKSPACE_BIN}/kubectl"
 
-              cp k8s-Usecase/deployment.yaml /tmp/deployment-"$EFFECTIVE_VERSION".yaml
-              sed -i \"s|IMAGE_PLACEHOLDER|${imageToUse}|g\" /tmp/deployment-"$EFFECTIVE_VERSION".yaml
-              sed -i \"s|VERSION_PLACEHOLDER|${env.EFFECTIVE_VERSION}|g\" /tmp/deployment-"$EFFECTIVE_VERSION".yaml
+              cp k8s-Usecase/deployment.yaml /tmp/deployment-"${env.EFFECTIVE_VERSION}".yaml
+              sed -i "s|IMAGE_PLACEHOLDER|${imageToUse}|g" /tmp/deployment-"${env.EFFECTIVE_VERSION}".yaml
+              sed -i "s|VERSION_PLACEHOLDER|${env.EFFECTIVE_VERSION}|g" /tmp/deployment-"${env.EFFECTIVE_VERSION}".yaml
 
-              ${KUBECTL} apply -f /tmp/deployment-"$EFFECTIVE_VERSION".yaml -n java-app --validate=false || echo "Deployment apply failed"
+              ${KUBECTL} apply -f /tmp/deployment-"${env.EFFECTIVE_VERSION}".yaml -n java-app --validate=false || echo "Deployment apply failed"
             """
 
             if (safeMode) {
               echo "Applying SAFE patches (replicas=${SAFE_REPLICAS})"
               sh '''
                 set -e
-                export KUBECONFIG="$KUBECONFIG"
-                KUBECTL="$WORKSPACE_BIN/kubectl"
+                export KUBECONFIG="${KUBECONFIG}"
+                KUBECTL="${WORKSPACE_BIN}/kubectl"
 
                 ${KUBECTL} scale deployment/java-gradle-app -n java-app --replicas=$SAFE_REPLICAS || true
                 ${KUBECTL} patch deployment java-gradle-app -n java-app --type='merge' -p '{
@@ -306,8 +317,8 @@ PY
               echo "Ensuring readinessProbe present"
               sh '''
                 set -e
-                export KUBECONFIG="$KUBECONFIG"
-                KUBECTL="$WORKSPACE_BIN/kubectl"
+                export KUBECONFIG="${KUBECONFIG}"
+                KUBECTL="${WORKSPACE_BIN}/kubectl"
 
                 ${KUBECTL} patch deployment java-gradle-app -n java-app --type='merge' -p '{
                   "spec": {
@@ -334,16 +345,16 @@ PY
             // patch ingress whitelist
             sh """
               set -e
-              export KUBECONFIG="$KUBECONFIG"
-              KUBECTL="$WORKSPACE_BIN/kubectl"
+              export KUBECONFIG="${KUBECONFIG}"
+              KUBECTL="${WORKSPACE_BIN}/kubectl"
               ${KUBECTL} patch ingress java-app-ingress -n java-app --type='merge' -p '{\"metadata\":{\"annotations\":{\"nginx.ingress.kubernetes.io/whitelist-source-range\":\"${params.ALLOWED_IP_CIDR}\"}}}' || echo "Ingress whitelist patch skipped/failed"
             """
 
             // wait for rollout or collect debug info on failure
             sh '''
               set -e
-              export KUBECONFIG="$KUBECONFIG"
-              KUBECTL="$WORKSPACE_BIN/kubectl"
+              export KUBECONFIG="${KUBECONFIG}"
+              KUBECTL="${WORKSPACE_BIN}/kubectl"
 
               if ${KUBECTL} rollout status deployment/java-gradle-app -n java-app --timeout=900s; then
                 echo "Rollout succeeded."
@@ -363,8 +374,8 @@ PY
             echo "ROLLBACK requested"
             sh '''
               set -e
-              export KUBECONFIG="$KUBECONFIG"
-              KUBECTL="$WORKSPACE_BIN/kubectl"
+              export KUBECONFIG="${KUBECONFIG}"
+              KUBECTL="${WORKSPACE_BIN}/kubectl"
 
               ${KUBECTL} rollout undo deployment/java-gradle-app -n java-app || { echo "rollback failed"; exit 1; }
               ${KUBECTL} rollout status deployment/java-gradle-app -n java-app --timeout=300s || { echo "rollback wait failed"; exit 1; }
@@ -375,14 +386,12 @@ PY
     }
 
     stage('Verify & Test (attempt homepage fetch)') {
-      when {
-        expression { env.SKIP_K8S != 'true' }
-      }
+      when { expression { env.SKIP_K8S != 'true' } }
       steps {
         sh '''
           set -e
-          export KUBECONFIG="$KUBECONFIG"
-          KUBECTL="$WORKSPACE_BIN/kubectl"
+          export KUBECONFIG="${KUBECONFIG}"
+          KUBECTL="${WORKSPACE_BIN}/kubectl"
 
           echo "=== DEPLOYMENT ==="
           ${KUBECTL} get deployment java-gradle-app -n java-app -o wide || true
@@ -420,11 +429,9 @@ PY
         echo "Build number: ${env.BUILD_NUMBER}"
         echo "Status: ${currentResult}"
       }
-      sh '''rm -f /tmp/deployment-* /tmp/decide_mode 2>/dev/null || true'''
+      sh '''rm -f /tmp/deployment-* /tmp/decide_mode /tmp/jenkins_skip_k8s 2>/dev/null || true'''
     }
     success { echo "Pipeline completed successfully." }
-    failure {
-      echo "Pipeline failed. See console output above for details."
-    }
+    failure { echo "Pipeline failed. See console output above for details." }
   }
 }
