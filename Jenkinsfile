@@ -1,10 +1,3 @@
-<think>
-First, the user is providing the pipeline script again, but it's cut off at the end: "// patch ingress whitelist" and then "set write the whole pipeline". It seems like the pipeline is incomplete, and the user is asking to "write the whole pipeline".
-
-
-## Reviewing User Input  
-- The user provided a pipeline script, but it cuts off at "// patch ingress whitelist" and mentions "set write the whole pipeline.
-</think>```groovy
 pipeline {
   agent any
 
@@ -429,4 +422,4 @@ PY
       sh '''rm -f /tmp/deployment-* /tmp/decide_mode 2>/dev/null || true'''
     }
     success { echo "Pipeline completed successfully." }
-    failure { echo "Pipeline failed.
+    failure { echo "Pipeline failed."
