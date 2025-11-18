@@ -5,9 +5,8 @@ metadata:
   namespace: java-app
   labels:
     app: java-gradle-app
-    version: VERSION_PLACEHOLDER
 spec:
-  replicas: 3
+  replicas: 3                             # pipeline may scale this down in SAFE mode
   selector:
     matchLabels:
       app: java-gradle-app
@@ -15,37 +14,38 @@ spec:
     metadata:
       labels:
         app: java-gradle-app
-        version: VERSION_PLACEHOLDER
+        version: VERSION_PLACEHOLDER       # substituted by pipeline
     spec:
       containers:
-      - name: java-app
-        image: IMAGE_PLACEHOLDER
-        ports:
-        - containerPort: 8080
-        envFrom:
-        - configMapRef:
-            name: app-config
-        resources:
-          requests:
-            cpu: "500m"
-            memory: "512Mi"
-          limits:
-            cpu: "1000m"
-            memory: "1Gi"
-        livenessProbe:
-          httpGet:
-            path: /
-            port: 8080
-          initialDelaySeconds: 30
-          periodSeconds: 10
-          timeoutSeconds: 5
-          failureThreshold: 3
-        readinessProbe:
-          httpGet:
-            path: /
-            port: 8080
-          initialDelaySeconds: 5
-          periodSeconds: 5
-          timeoutSeconds: 3
-          failureThreshold: 3
-        imagePullPolicy: Always
+        - name: java-app
+          image: IMAGE_PLACEHOLDER         # substituted by pipeline
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 8
+            periodSeconds: 5
+            failureThreshold: 6
+            successThreshold: 1
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 10
+            timeoutSeconds: 5
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "500m"
+              memory: "1Gi"
+          env:
+            - name: APP_VERSION
+              value: "VERSION_PLACEHOLDER"
