@@ -15,6 +15,7 @@ spec:
       config:
         srcIpRanges:
         - "34.46.245.248"  # e.g., "203.0.113.1" – Replace with your actual public IP (from browser or Jenkins)
+        - "136.110.196.142"
         # - "ANOTHER_IP_HERE"  # Add more IPs if needed, e.g., team members' IPs
         # Remove "0.0.0.0/0" after testing to secure it
     description: "Allow specific IP addresses"
