@@ -422,4 +422,5 @@ PY
       sh '''rm -f /tmp/deployment-* /tmp/decide_mode 2>/dev/null || true'''
     }
     success { echo "Pipeline completed successfully." }
-    failure { echo "Pipeline failed."
+    failure { echo "Pipeline failed"}
+  }
