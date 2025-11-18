@@ -13,7 +13,7 @@ pipeline {
            choices: ['v1.0', 'v2.0'],
            description: 'Choose version to deploy (ignored on first run)')
     string(name: 'ALLOWED_IP_CIDR',
-           defaultValue: '',
+           defaultValue: '136.119.42.77',
            description: 'CIDR to whitelist on the ingress (change per-run)')
   }
 
