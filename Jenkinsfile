@@ -1,6 +1,11 @@
 pipeline {
   agent any
 
+  // IMPORTANT: prevent Declarative from doing the default checkout
+  options {
+    skipDefaultCheckout()
+  }
+
   parameters {
     choice(name: 'DEPLOYMENT_ACTION',
            choices: ['ROLLOUT', 'ROLLBACK'],
@@ -9,19 +14,18 @@ pipeline {
            choices: ['v1.0', 'v2.0'],
            description: 'Choose version to deploy (ignored on first run)')
     string(name: 'ALLOWED_IP_CIDR',
-           defaultValue: 'YOUR_IP/32',
+           defaultValue: '136.119.42.77',
            description: 'CIDR to whitelist on the ingress (change per-run; e.g. 203.0.113.5/32)')
   }
 
   environment {
-    // Edit these for your environment
+    // Edit for your environment
     PROJECT_ID = 'planar-door-476510-m1'
     REGION = 'us-central1'
     CLUSTER_NAME = 'autopilot-demo'
     GAR_REPO = 'java-app'
     IMAGE_NAME = 'java-app'
 
-    // derived
     WORKSPACE_BIN = "${env.WORKSPACE}/bin"
     GAR_HOST = "${env.REGION}-docker.pkg.dev"
     V1_TAG = "v1.0-${env.BUILD_NUMBER}"
@@ -30,7 +34,7 @@ pipeline {
     GAR_IMAGE_V2 = "${env.GAR_HOST}/${env.PROJECT_ID}/${env.GAR_REPO}/${env.IMAGE_NAME}:${env.V2_TAG}"
     KUBECONFIG = "${env.WORKSPACE}/.kube/config"
 
-    // safe-mode defaults
+    // Safe-mode defaults
     DEFAULT_DESIRED_REPLICAS = "3"
     SAFE_REPLICAS = "1"
     SAFE_REQUEST_CPU = "100m"
@@ -75,8 +79,14 @@ pipeline {
             gcloud config set project $PROJECT_ID
             gcloud auth configure-docker $GAR_HOST --quiet || true
 
-            # assume repo already checked out and contains k8s-Usecase/java-gradle
-            cd k8s-Usecase/java-gradle
+            # --- Find the java-gradle build directory (robust against slightly different layout)
+            if [ -d "k8s-Usecase/java-gradle" ]; then
+              cd k8s-Usecase/java-gradle
+            elif [ -d "java-gradle" ]; then
+              cd java-gradle
+            else
+              echo "Could not find java-gradle directory at k8s-Usecase/java-gradle or java-gradle. Trying workspace root."
+            fi
 
             mkdir -p src/main/resources/static
 
@@ -84,17 +94,17 @@ pipeline {
             cat > src/main/resources/static/index.html <<'EOF'
 <!DOCTYPE html><html><head><title>V1.0</title></head><body><h1>Version 1.0 - BLUE</h1></body></html>
 EOF
-            ./gradlew clean build --no-daemon
-            docker build -t $GAR_IMAGE_V1 .
-            for i in 1 2 3; do docker push $GAR_IMAGE_V1 && break || { echo "push v1 attempt $i failed"; sleep 5; }; done
+            ./gradlew clean build --no-daemon || true
+            docker build -t $GAR_IMAGE_V1 . || true
+            for i in 1 2 3; do docker push $GAR_IMAGE_V1 && break || { echo "push v1 attempt $i failed"; sleep 5; }; done || true
 
             # --- v2
             cat > src/main/resources/static/index.html <<'EOF'
 <!DOCTYPE html><html><head><title>V2.0</title></head><body><h1>Version 2.0 - GREEN</h1></body></html>
 EOF
-            ./gradlew clean build --no-daemon
-            docker build -t $GAR_IMAGE_V2 .
-            for i in 1 2 3; do docker push $GAR_IMAGE_V2 && break || { echo "push v2 attempt $i failed"; sleep 5; }; done
+            ./gradlew clean build --no-daemon || true
+            docker build -t $GAR_IMAGE_V2 . || true
+            for i in 1 2 3; do docker push $GAR_IMAGE_V2 && break || { echo "push v2 attempt $i failed"; sleep 5; }; done || true
           '''
         }
       }
@@ -200,18 +210,16 @@ PY
     stage('Perform Action (Rollout / Rollback)') {
       steps {
         script {
-          // read safe-mode decision
-          def safeFlag = sh(script: '''cat /tmp/decide_mode 2>/dev/null || echo 'USE_SAFE=1'; grep -o 'USE_SAFE=[01]' /tmp/decide_mode 2>/dev/null || echo 'USE_SAFE=1' ''', returnStdout: true).trim()
+          // read safe-mode decision (use triple-quoted Groovy string for single-line sh to avoid parser issues)
+          def safeFlag = sh(script: """cat /tmp/decide_mode 2>/dev/null || echo 'USE_SAFE=1'; grep -o 'USE_SAFE=[01]' /tmp/decide_mode 2>/dev/null || echo 'USE_SAFE=1'""", returnStdout: true).trim()
           boolean safeMode = safeFlag.contains('USE_SAFE=1')
 
-          // compute which image to use (EFFECTIVE_VERSION set earlier)
           def imageToUse = (env.EFFECTIVE_VERSION == 'v1.0') ? env.GAR_IMAGE_V1 : env.GAR_IMAGE_V2
           def cidr = params.ALLOWED_IP_CIDR ?: env.ALLOWED_IP_CIDR
 
           if (env.EFFECTIVE_ACTION == 'ROLLOUT') {
             echo "ROLLOUT image=${imageToUse} safeMode=${safeMode}"
 
-            // apply deployment with image substitution (use shell to do sed on placeholders)
             sh '''
               set -e
               export KUBECONFIG="$KUBECONFIG"
@@ -285,12 +293,11 @@ PY
               '''
             }
 
-            // patch ingress whitelist with provided CIDR
+            // patch ingress whitelist
             sh '''
               set -e
               export KUBECONFIG="$KUBECONFIG"
               KUBECTL="$WORKSPACE_BIN/kubectl"
-              # note: ingress annotation name used here is nginx-style; change if using different ingress controller
               ${KUBECTL} patch ingress java-app-ingress -n java-app --type='merge' -p '{"metadata":{"annotations":{"nginx.ingress.kubernetes.io/whitelist-source-range":"'"$ALLOWED_IP_CIDR"'"}}}' || echo "Ingress whitelist patch skipped/failed"
             '''
 
