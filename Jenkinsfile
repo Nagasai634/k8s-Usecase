@@ -1,25 +1,18 @@
 pipeline {
   agent any
 
-  // IMPORTANT: prevent Declarative from doing the default checkout
-  options {
-    skipDefaultCheckout()
-  }
+  options { skipDefaultCheckout(); timestamps() }
 
   parameters {
-    choice(name: 'DEPLOYMENT_ACTION',
-           choices: ['ROLLOUT', 'ROLLBACK'],
+    choice(name: 'DEPLOYMENT_ACTION', choices: ['ROLLOUT', 'ROLLBACK'],
            description: 'Choose deployment action (ignored on first run; first run auto-deploys v1.0)')
-    choice(name: 'VERSION',
-           choices: ['v1.0', 'v2.0'],
+    choice(name: 'VERSION', choices: ['v1.0', 'v2.0'],
            description: 'Choose version to deploy (ignored on first run)')
-    string(name: 'ALLOWED_IP_CIDR',
-           defaultValue: '136.119.42.77',
-           description: 'CIDR to whitelist on the ingress (change per-run; e.g. 203.0.113.5/32)')
+    string(name: 'ALLOWED_IP_CIDR', defaultValue: '136.119.42.77',
+           description: 'CIDR to whitelist on the ingress (single IP will be auto /32)')
   }
 
   environment {
-    // Edit for your environment
     PROJECT_ID = 'planar-door-476510-m1'
     REGION = 'us-central1'
     CLUSTER_NAME = 'autopilot-demo'
@@ -34,7 +27,6 @@ pipeline {
     GAR_IMAGE_V2 = "${env.GAR_HOST}/${env.PROJECT_ID}/${env.GAR_REPO}/${env.IMAGE_NAME}:${env.V2_TAG}"
     KUBECONFIG = "${env.WORKSPACE}/.kube/config"
 
-    // Safe-mode defaults
     DEFAULT_DESIRED_REPLICAS = "3"
     SAFE_REPLICAS = "1"
     SAFE_REQUEST_CPU = "100m"
@@ -48,6 +40,7 @@ pipeline {
       steps {
         sh '''
           set -e
+          export PATH="$WORKSPACE_BIN:$PATH"
           mkdir -p "$WORKSPACE_BIN"
           if [ ! -x "$WORKSPACE_BIN/kubectl" ]; then
             KVER=$(curl -fsSL https://dl.k8s.io/release/stable.txt)
@@ -56,41 +49,38 @@ pipeline {
           fi
           echo "kubectl (client):"
           "$WORKSPACE_BIN/kubectl" version --client || true
-
-          if command -v docker >/dev/null 2>&1; then
-            docker --version || true
-          else
-            echo "WARNING: docker not found on agent. Build/push will fail without docker."
-          fi
-
+          if command -v docker >/dev/null 2>&1; then docker --version || true; else echo "WARNING: docker not found on agent"; fi
           gcloud --version || true
         '''
       }
     }
 
-    stage('Build & Push Images (both v1 & v2)') {
+    stage('Build & Push Images (v1 & v2)') {
       steps {
-        // expects Jenkins file credential id 'gcp-service-account-key'
         withCredentials([file(credentialsId: 'gcp-service-account-key', variable: 'GCP_SA_KEYFILE')]) {
           sh '''
             set -e
+            export PATH="$WORKSPACE_BIN:$PATH"
             export GOOGLE_APPLICATION_CREDENTIALS="$GCP_SA_KEYFILE"
             gcloud auth activate-service-account --key-file="$GOOGLE_APPLICATION_CREDENTIALS"
             gcloud config set project $PROJECT_ID
             gcloud auth configure-docker $GAR_HOST --quiet || true
 
-            # --- Find the java-gradle build directory (robust against slightly different layout)
+            # find java-gradle dir
             if [ -d "k8s-Usecase/java-gradle" ]; then
               cd k8s-Usecase/java-gradle
             elif [ -d "java-gradle" ]; then
               cd java-gradle
             else
-              echo "Could not find java-gradle directory at k8s-Usecase/java-gradle or java-gradle. Trying workspace root."
+              echo "Warning: java-gradle not found in expected subpaths, continuing from workspace root"
             fi
+
+            # make gradlew executable if present
+            if [ -f ./gradlew ]; then chmod +x ./gradlew || true; fi
 
             mkdir -p src/main/resources/static
 
-            # --- v1
+            # v1
             cat > src/main/resources/static/index.html <<'EOF'
 <!DOCTYPE html><html><head><title>V1.0</title></head><body><h1>Version 1.0 - BLUE</h1></body></html>
 EOF
@@ -98,7 +88,7 @@ EOF
             docker build -t $GAR_IMAGE_V1 . || true
             for i in 1 2 3; do docker push $GAR_IMAGE_V1 && break || { echo "push v1 attempt $i failed"; sleep 5; }; done || true
 
-            # --- v2
+            # v2
             cat > src/main/resources/static/index.html <<'EOF'
 <!DOCTYPE html><html><head><title>V2.0</title></head><body><h1>Version 2.0 - GREEN</h1></body></html>
 EOF
@@ -115,13 +105,19 @@ EOF
         withCredentials([file(credentialsId: 'gcp-service-account-key', variable: 'GCP_SA_KEYFILE')]) {
           sh '''
             set -e
+            export PATH="$WORKSPACE_BIN:$PATH"
             export GOOGLE_APPLICATION_CREDENTIALS="$GCP_SA_KEYFILE"
             gcloud auth activate-service-account --key-file="$GOOGLE_APPLICATION_CREDENTIALS"
             gcloud config set project $PROJECT_ID
+
+            # attempt to ensure gke-gcloud-auth-plugin (non-fatal)
+            gcloud components install gke-gcloud-auth-plugin --quiet || true
+
             gcloud container clusters get-credentials $CLUSTER_NAME --region=$REGION --project=$PROJECT_ID --quiet
 
             mkdir -p "$(dirname $KUBECONFIG)"
-            kubectl config view --raw > "$KUBECONFIG"
+            # use workspace kubectl binary explicitly to avoid "kubectl: not found"
+            "$WORKSPACE_BIN/kubectl" config view --raw > "$KUBECONFIG" || true
             echo "Wrote kubeconfig to $KUBECONFIG"
             "$WORKSPACE_BIN/kubectl" --kubeconfig="$KUBECONFIG" cluster-info || true
           '''
@@ -154,6 +150,7 @@ EOF
         withCredentials([file(credentialsId: 'gcp-service-account-key', variable: 'GCP_SA_KEYFILE')]) {
           sh '''
             set -e
+            export PATH="$WORKSPACE_BIN:$PATH"
             export GOOGLE_APPLICATION_CREDENTIALS="$GCP_SA_KEYFILE"
             gcloud auth activate-service-account --key-file="$GOOGLE_APPLICATION_CREDENTIALS"
             gcloud config set project $PROJECT_ID
@@ -195,6 +192,7 @@ PY
       steps {
         sh '''
           set -e
+          export PATH="$WORKSPACE_BIN:$PATH"
           export KUBECONFIG="$KUBECONFIG"
           KUBECTL="$WORKSPACE_BIN/kubectl"
 
@@ -210,18 +208,28 @@ PY
     stage('Perform Action (Rollout / Rollback)') {
       steps {
         script {
-          // read safe-mode decision (use triple-quoted Groovy string for single-line sh to avoid parser issues)
+          // normalize ALLOWED_IP_CIDR: if single IP without slash, append /32
+          sh '''
+            set -e
+            case "$ALLOWED_IP_CIDR" in
+              */*) echo "$ALLOWED_IP_CIDR" > /tmp/allowed_cidr ;;
+              *) echo "$ALLOWED_IP_CIDR/32" > /tmp/allowed_cidr ;;
+            esac
+          '''
+          def allowedCidr = sh(script: "cat /tmp/allowed_cidr", returnStdout: true).trim()
+          env.ALLOWED_IP_CIDR = allowedCidr
+
           def safeFlag = sh(script: """cat /tmp/decide_mode 2>/dev/null || echo 'USE_SAFE=1'; grep -o 'USE_SAFE=[01]' /tmp/decide_mode 2>/dev/null || echo 'USE_SAFE=1'""", returnStdout: true).trim()
           boolean safeMode = safeFlag.contains('USE_SAFE=1')
 
           def imageToUse = (env.EFFECTIVE_VERSION == 'v1.0') ? env.GAR_IMAGE_V1 : env.GAR_IMAGE_V2
-          def cidr = params.ALLOWED_IP_CIDR ?: env.ALLOWED_IP_CIDR
 
           if (env.EFFECTIVE_ACTION == 'ROLLOUT') {
             echo "ROLLOUT image=${imageToUse} safeMode=${safeMode}"
 
             sh '''
               set -e
+              export PATH="$WORKSPACE_BIN:$PATH"
               export KUBECONFIG="$KUBECONFIG"
               KUBECTL="$WORKSPACE_BIN/kubectl"
 
@@ -233,80 +241,39 @@ PY
             '''
 
             if (safeMode) {
-              echo "Applying SAFE patches (replicas=${SAFE_REPLICAS})"
               sh '''
                 set -e
+                export PATH="$WORKSPACE_BIN:$PATH"
                 export KUBECONFIG="$KUBECONFIG"
                 KUBECTL="$WORKSPACE_BIN/kubectl"
-
                 ${KUBECTL} scale deployment/java-gradle-app -n java-app --replicas=$SAFE_REPLICAS || true
                 ${KUBECTL} patch deployment java-gradle-app -n java-app --type='merge' -p '{
-                  "spec":{
-                    "template":{
-                      "spec":{
-                        "containers":[
-                          {
-                            "name":"java-app",
-                            "resources":{
-                              "requests":{"cpu":"'"$SAFE_REQUEST_CPU"'","memory":"'"$SAFE_REQUEST_MEM"'"},
-                              "limits":{"cpu":"'"$SAFE_LIMIT_CPU"'","memory":"'"$SAFE_LIMIT_MEM"'"}
-                            },
-                            "readinessProbe":{
-                              "httpGet":{"path":"/","port":8080},
-                              "initialDelaySeconds":8,
-                              "periodSeconds":5,
-                              "failureThreshold":6
-                            }
-                          }
-                        ]
-                      }
-                    }
-                  }
-                }' || true
+                  "spec":{"template":{"spec":{"containers":[{"name":"java-app","resources":{"requests":{"cpu":"'"$SAFE_REQUEST_CPU"'","memory":"'"$SAFE_REQUEST_MEM"'"},"limits":{"cpu":"'"$SAFE_LIMIT_CPU"'","memory":"'"$SAFE_LIMIT_MEM"'"}},"readinessProbe":{"httpGet":{"path":"/","port":8080},"initialDelaySeconds":8,"periodSeconds":5,"failureThreshold":6}}]}}}}' || true
               '''
             } else {
-              echo "Ensuring readinessProbe present"
               sh '''
                 set -e
+                export PATH="$WORKSPACE_BIN:$PATH"
                 export KUBECONFIG="$KUBECONFIG"
                 KUBECTL="$WORKSPACE_BIN/kubectl"
-
                 ${KUBECTL} patch deployment java-gradle-app -n java-app --type='merge' -p '{
-                  "spec":{
-                    "template":{
-                      "spec":{
-                        "containers":[
-                          {
-                            "name":"java-app",
-                            "readinessProbe":{
-                              "httpGet":{"path":"/","port":8080},
-                              "initialDelaySeconds":8,
-                              "periodSeconds":5,
-                              "failureThreshold":6
-                            }
-                          }
-                        ]
-                      }
-                    }
-                  }
-                }' || true
+                  "spec":{"template":{"spec":{"containers":[{"name":"java-app","readinessProbe":{"httpGet":{"path":"/","port":8080},"initialDelaySeconds":8,"periodSeconds":5,"failureThreshold":6}}]}}}}' || true
               '''
             }
 
-            // patch ingress whitelist
             sh '''
               set -e
+              export PATH="$WORKSPACE_BIN:$PATH"
               export KUBECONFIG="$KUBECONFIG"
               KUBECTL="$WORKSPACE_BIN/kubectl"
               ${KUBECTL} patch ingress java-app-ingress -n java-app --type='merge' -p '{"metadata":{"annotations":{"nginx.ingress.kubernetes.io/whitelist-source-range":"'"$ALLOWED_IP_CIDR"'"}}}' || echo "Ingress whitelist patch skipped/failed"
             '''
 
-            // wait for rollout or collect debug info on failure
             sh '''
               set -e
+              export PATH="$WORKSPACE_BIN:$PATH"
               export KUBECONFIG="$KUBECONFIG"
               KUBECTL="$WORKSPACE_BIN/kubectl"
-
               if ${KUBECTL} rollout status deployment/java-gradle-app -n java-app --timeout=900s; then
                 echo "Rollout succeeded."
               else
@@ -325,9 +292,9 @@ PY
             echo "ROLLBACK requested"
             sh '''
               set -e
+              export PATH="$WORKSPACE_BIN:$PATH"
               export KUBECONFIG="$KUBECONFIG"
               KUBECTL="$WORKSPACE_BIN/kubectl"
-
               ${KUBECTL} rollout undo deployment/java-gradle-app -n java-app || { echo "rollback failed"; exit 1; }
               ${KUBECTL} rollout status deployment/java-gradle-app -n java-app --timeout=300s || { echo "rollback wait failed"; exit 1; }
             '''
@@ -340,6 +307,7 @@ PY
       steps {
         sh '''
           set -e
+          export PATH="$WORKSPACE_BIN:$PATH"
           export KUBECONFIG="$KUBECONFIG"
           KUBECTL="$WORKSPACE_BIN/kubectl"
 
@@ -379,7 +347,7 @@ PY
         echo "Build number: ${env.BUILD_NUMBER}"
         echo "Status: ${currentResult}"
       }
-      sh '''rm -f /tmp/deployment-* /tmp/decide_mode 2>/dev/null || true'''
+      sh '''rm -f /tmp/deployment-* /tmp/decide_mode /tmp/allowed_cidr 2>/dev/null || true'''
     }
     success { echo "Pipeline completed successfully." }
     failure { echo "Pipeline failed. Inspect logs for quota, readiness, pod events, or image push errors." }
