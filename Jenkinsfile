@@ -66,7 +66,7 @@ pipeline {
             gcloud config set project $PROJECT_ID
             gcloud auth configure-docker $GAR_HOST --quiet || true
 
-            # find java-gradle dir
+            # locate java project
             if [ -d "k8s-Usecase/java-gradle" ]; then
               cd k8s-Usecase/java-gradle
             elif [ -d "java-gradle" ]; then
@@ -75,26 +75,37 @@ pipeline {
               echo "Warning: java-gradle not found in expected subpaths, continuing from workspace root"
             fi
 
-            # make gradlew executable if present
+            # ensure gradlew executable
             if [ -f ./gradlew ]; then chmod +x ./gradlew || true; fi
 
             mkdir -p src/main/resources/static
 
-            # v1
+            # build v1
             cat > src/main/resources/static/index.html <<'EOF'
 <!DOCTYPE html><html><head><title>V1.0</title></head><body><h1>Version 1.0 - BLUE</h1></body></html>
 EOF
-            ./gradlew clean build --no-daemon || true
-            docker build -t $GAR_IMAGE_V1 . || true
-            for i in 1 2 3; do docker push $GAR_IMAGE_V1 && break || { echo "push v1 attempt $i failed"; sleep 5; }; done || true
+            echo "Running gradle build (v1)..."
+            ./gradlew clean build --no-daemon   # DO NOT swallow failures; fail the step if build breaks
+            # ensure artifact exists
+            if [ ! -f build/libs/*.jar ]; then
+              echo "ERROR: build/libs/*.jar not found after gradle build (v1). Aborting."
+              exit 2
+            fi
+            docker build -t $GAR_IMAGE_V1 . 
+            for i in 1 2 3; do docker push $GAR_IMAGE_V1 && break || { echo "push v1 attempt $i failed"; sleep 5; }; done
 
-            # v2
+            # build v2
             cat > src/main/resources/static/index.html <<'EOF'
 <!DOCTYPE html><html><head><title>V2.0</title></head><body><h1>Version 2.0 - GREEN</h1></body></html>
 EOF
-            ./gradlew clean build --no-daemon || true
-            docker build -t $GAR_IMAGE_V2 . || true
-            for i in 1 2 3; do docker push $GAR_IMAGE_V2 && break || { echo "push v2 attempt $i failed"; sleep 5; }; done || true
+            echo "Running gradle build (v2)..."
+            ./gradlew clean build --no-daemon
+            if [ ! -f build/libs/*.jar ]; then
+              echo "ERROR: build/libs/*.jar not found after gradle build (v2). Aborting."
+              exit 2
+            fi
+            docker build -t $GAR_IMAGE_V2 .
+            for i in 1 2 3; do docker push $GAR_IMAGE_V2 && break || { echo "push v2 attempt $i failed"; sleep 5; }; done
           '''
         }
       }
@@ -110,13 +121,13 @@ EOF
             gcloud auth activate-service-account --key-file="$GOOGLE_APPLICATION_CREDENTIALS"
             gcloud config set project $PROJECT_ID
 
-            # attempt to ensure gke-gcloud-auth-plugin (non-fatal)
+            # non-fatal attempt to ensure auth plugin
             gcloud components install gke-gcloud-auth-plugin --quiet || true
 
+            # get credentials into kubeconfig
             gcloud container clusters get-credentials $CLUSTER_NAME --region=$REGION --project=$PROJECT_ID --quiet
 
             mkdir -p "$(dirname $KUBECONFIG)"
-            # use workspace kubectl binary explicitly to avoid "kubectl: not found"
             "$WORKSPACE_BIN/kubectl" config view --raw > "$KUBECONFIG" || true
             echo "Wrote kubeconfig to $KUBECONFIG"
             "$WORKSPACE_BIN/kubectl" --kubeconfig="$KUBECONFIG" cluster-info || true
@@ -159,27 +170,34 @@ EOF
             REQ_PER_POD_M=250
             REQ_TOTAL_M=$((DESIRED * REQ_PER_POD_M))
 
-            QLINE=$(gcloud compute regions describe $REGION --project=$PROJECT_ID --format="value(quotas[?metric=='CPUS'].limit,quotas[?metric=='CPUS'].usage)" || echo "")
+            # query region CPU quota; if empty -> SAFE mode
+            QLINE=$(gcloud compute regions describe $REGION --project=$PROJECT_ID --format="value(quotas[?metric=='CPUS'].limit,quotas[?metric=='CPUS'].usage)" 2>/dev/null || echo "")
             if [ -z "$QLINE" ]; then
-              echo "Could not read CPUS quota -> SAFE mode"
+              echo "Could not read CPUS quota (empty QLINE) -> enabling SAFE mode"
               echo "USE_SAFE=1" > /tmp/decide_mode
             else
+              # QLINE contains: "<limit> <usage>"
               LIMIT=$(echo $QLINE | awk '{print $1}')
               USAGE=$(echo $QLINE | awk '{print $2}')
-              AVAIL_M=$(python3 - <<PY
+              if [ -z "$LIMIT" ] || [ -z "$USAGE" ]; then
+                echo "Quota query returned unexpected output -> SAFE mode"
+                echo "USE_SAFE=1" > /tmp/decide_mode
+              else
+                AVAIL_M=$(python3 - <<PY
 limit=${LIMIT}
 usage=${USAGE}
 avail = float(limit) - float(usage)
 print(int(avail*1000))
 PY
 )
-              echo "CPUs limit=${LIMIT}, usage=${USAGE}, avail_m=${AVAIL_M}"
-              if [ ${AVAIL_M} -lt ${REQ_TOTAL_M} ]; then
-                echo "Not enough CPU quota (${AVAIL_M}m < ${REQ_TOTAL_M}m) -> SAFE"
-                echo "USE_SAFE=1" > /tmp/decide_mode
-              else
-                echo "Quota sufficient -> NORMAL"
-                echo "USE_SAFE=0" > /tmp/decide_mode
+                echo "CPUs limit=${LIMIT}, usage=${USAGE}, avail_m=${AVAIL_M}"
+                if [ ${AVAIL_M} -lt ${REQ_TOTAL_M} ]; then
+                  echo "Not enough CPU quota (${AVAIL_M}m < ${REQ_TOTAL_M}m) -> SAFE"
+                  echo "USE_SAFE=1" > /tmp/decide_mode
+                else
+                  echo "Quota sufficient -> NORMAL"
+                  echo "USE_SAFE=0" > /tmp/decide_mode
+                fi
               fi
             fi
             cat /tmp/decide_mode || true
@@ -208,7 +226,7 @@ PY
     stage('Perform Action (Rollout / Rollback)') {
       steps {
         script {
-          // normalize ALLOWED_IP_CIDR: if single IP without slash, append /32
+          // normalize ALLOWED_IP_CIDR
           sh '''
             set -e
             case "$ALLOWED_IP_CIDR" in
