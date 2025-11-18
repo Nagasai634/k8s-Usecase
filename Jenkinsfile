@@ -1,6 +1,10 @@
 pipeline {
   agent any
 
+  options {
+    skipDefaultCheckout()
+  }
+
   parameters {
     choice(name: 'DEPLOYMENT_ACTION',
            choices: ['ROLLOUT', 'ROLLBACK'],
