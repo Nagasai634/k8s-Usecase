@@ -44,6 +44,12 @@ pipeline {
   }
 
   stages {
+    stage('Checkout Repo') {
+      steps {
+        checkout scm
+      }
+    }
+
     stage('Ensure Tools') {
       steps {
         sh '''
