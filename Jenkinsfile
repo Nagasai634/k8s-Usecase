@@ -1,4 +1,4 @@
-// Jenkinsfile - Build (v1 & v2) -> Push to GAR -> Deploy to GKE Autopilot
+// Jenkinsfile - corrected: fixes kubectl path and installs gke-gcloud-auth-plugin
 pipeline {
   agent any
 
@@ -13,9 +13,9 @@ pipeline {
   }
 
   environment {
-    PROJECT_ID = 'planar-door-476510-m1'         // change to your project
+    PROJECT_ID = 'planar-door-476510-m1'
     REGION = 'us-central1'
-    CLUSTER_NAME = 'autopilot-demo'              // change if needed
+    CLUSTER_NAME = 'autopilot-demo'
     GAR_REPO = 'java-app'
     IMAGE_NAME = 'java-app'
     GAR_HOST = "${env.REGION}-docker.pkg.dev"
@@ -23,7 +23,7 @@ pipeline {
     YAML_DIR = "${env.WORKSPACE}/k8s-Usecase"
     WORK_BIN = "${env.WORKSPACE}/bin"
     KUBECONFIG = "${env.WORKSPACE}/.kube/config"
-    GCP_CRED_ID = 'gcp-service-account-key'      // secret file credential in Jenkins
+    GCP_CRED_ID = 'gcp-service-account-key'
   }
 
   stages {
@@ -38,17 +38,18 @@ pipeline {
         sh '''
           set -e
           mkdir -p ${WORKSPACE}/bin
-          # ensure repo dir exists (checkout normally does this)
           if [ ! -d "${YAML_DIR}" ]; then
             git clone https://github.com/Nagasai634/k8s-Usecase.git
           fi
         '''
+
+        // Install kubectl into workspace/bin
         sh '''
           set -e
           KVER=$(curl -fsSL https://dl.k8s.io/release/stable.txt)
-          curl -fsSL "https://dl.k8s.io/release/${KVER}/bin/linux/amd64/kubectl" -o ${WORKSPACE}/bin/kubectl
-          chmod +x ${WORKSPACE}/bin/kubectl
-          echo "kubectl installed to ${WORKSPACE}/bin/kubectl"
+          curl -fsSL "https://dl.k8s.io/release/${KVER}/bin/linux/amd64/kubectl" -o ${WORK_BIN}/kubectl
+          chmod +x ${WORK_BIN}/kubectl
+          echo "kubectl installed to ${WORK_BIN}/kubectl"
         '''
       }
     }
@@ -57,17 +58,17 @@ pipeline {
       steps {
         withCredentials([file(credentialsId: env.GCP_CRED_ID, variable: 'GCP_SA_KEYFILE')]) {
           script {
-            // compute image tags with build number
             def v1tag = "v1.0-${env.BUILD_NUMBER}"
             def v2tag = "v2.0-${env.BUILD_NUMBER}"
             env.GAR_IMAGE_V1 = "${env.GAR_HOST}/${env.PROJECT_ID}/${env.GAR_REPO}/${env.IMAGE_NAME}:${v1tag}"
             env.GAR_IMAGE_V2 = "${env.GAR_HOST}/${env.PROJECT_ID}/${env.GAR_REPO}/${env.IMAGE_NAME}:${v2tag}"
           }
 
-          // Build and push images. If Java build fails, build lightweight nginx image serving static page.
+          // Build & push (ensures PATH includes WORK_BIN)
           sh(
             '''
               set -e
+              export PATH="${WORK_BIN}:${PATH}"
               export GOOGLE_APPLICATION_CREDENTIALS="${GCP_SA_KEYFILE}"
               gcloud auth activate-service-account --key-file="${GOOGLE_APPLICATION_CREDENTIALS}"
               gcloud config set project ${PROJECT_ID}
@@ -75,37 +76,24 @@ pipeline {
 
               cd ${REPO_DIR}
               mkdir -p src/main/resources/static
-              if [ -f ./gradlew ]; then chmod +x ./gradlew; fi
+              if [ -f "./gradlew" ]; then chmod +x ./gradlew; fi
 
               build_and_push() {
                 local version=$1
                 local image=$2
                 echo "=== Build attempt for ${version} -> ${image} ==="
-
-                # try Java gradle build + docker image if possible
                 set +e
                 ./gradlew clean build --no-daemon
                 GRADLE_STATUS=$?
                 set -e
-
                 if [ "${GRADLE_STATUS}" -eq 0 ]; then
-                  echo "Gradle build succeeded for ${version} - building app docker image"
-                  # assume Dockerfile in repo is suitable; otherwise fallback will run
+                  echo "Gradle build succeeded - building app docker image"
                   docker build -t ${image} .
                 else
-                  echo "Gradle build failed for ${version}; building minimal nginx fallback image"
-                  # create a simple nginx Dockerfile that serves index.html
+                  echo "Gradle build failed; building minimal nginx fallback image"
                   TMPDIR=$(mktemp -d)
                   cat > ${TMPDIR}/index.html <<EOF
-<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>${version}</title></head>
-<body style="font-family:Arial;text-align:center;padding:60px;background:#f3f4f6">
-  <div style="display:inline-block;padding:30px;border-radius:8px;background:#111827;color:#fff">
-    <h1>${version} - FALLBACK</h1>
-    <p>This is a fallback static page (Gradle build failed).</p>
-  </div>
-</body>
-</html>
+<!DOCTYPE html><html><head><title>${version}</title></head><body><h1>${version} - FALLBACK</h1></body></html>
 EOF
                   cat > ${TMPDIR}/Dockerfile <<'DF'
 FROM nginx:1.25-alpine
@@ -116,13 +104,12 @@ DF
                   rm -rf ${TMPDIR}
                 fi
 
-                # push with up to 3 retries
                 for i in 1 2 3; do
                   if docker push ${image}; then
                     echo "Pushed ${image}"
                     break
                   else
-                    echo "Push attempt $i for ${image} failed"
+                    echo "Push attempt $i failed for ${image}"
                     sleep 5
                     if [ $i -eq 3 ]; then
                       echo "Failed to push ${image} after retries"
@@ -130,24 +117,21 @@ DF
                     fi
                   fi
                 done
-
                 return 0
               }
 
-              # create versioned index pages (app may override, but we ensure content exists)
+              # ensure content exists and build both
               cat > src/main/resources/static/index.html <<'EOF'
 <!DOCTYPE html><html><head><title>V1.0</title></head><body><h1>Version 1.0 - BLUE</h1></body></html>
 EOF
-
               build_and_push "v1.0" "${GAR_IMAGE_V1}"
 
               cat > src/main/resources/static/index.html <<'EOF'
 <!DOCTYPE html><html><head><title>V2.0</title></head><body><h1>Version 2.0 - GREEN</h1></body></html>
 EOF
-
               build_and_push "v2.0" "${GAR_IMAGE_V2}"
 
-              echo "Images available:"
+              echo "Images:"
               echo "  ${GAR_IMAGE_V1}"
               echo "  ${GAR_IMAGE_V2}"
             '''
@@ -156,19 +140,53 @@ EOF
       }
     }
 
-    stage('Authenticate to GKE') {
+    stage('Authenticate to GKE (install plugin if needed)') {
       steps {
         withCredentials([file(credentialsId: env.GCP_CRED_ID, variable: 'GCP_SA_KEYFILE')]) {
+          // Try installing gke-gcloud-auth-plugin and ensure kubectl is invoked via WORK_BIN path
           sh '''
             set -e
+            export PATH="${WORK_BIN}:${PATH}"
             export GOOGLE_APPLICATION_CREDENTIALS="${GCP_SA_KEYFILE}"
             gcloud auth activate-service-account --key-file="${GOOGLE_APPLICATION_CREDENTIALS}"
             gcloud config set project ${PROJECT_ID}
-            gcloud container clusters get-credentials ${CLUSTER_NAME} --region=${REGION} --project=${PROJECT_ID} --quiet
-            mkdir -p $(dirname ${KUBECONFIG})
-            kubectl config view --raw > ${KUBECONFIG}
-            echo "Wrote kubeconfig to ${KUBECONFIG}"
+
+            # Try to install gke-gcloud-auth-plugin (may be a no-op if already present)
+            echo "Installing gke-gcloud-auth-plugin (if needed)"
+            gcloud components install gke-gcloud-auth-plugin --quiet || echo "gcloud components install may not be supported on this environment"
+
+            # Now get credentials (this will prefer plugin if available)
+            gcloud container clusters get-credentials ${CLUSTER_NAME} --region=${REGION} --project=${PROJECT_ID} --quiet || {
+              echo "gcloud get-credentials failed — attempting token-based kubeconfig fallback"
+              # fallback: fetch cluster endpoint and CA, create kubeconfig using access token
+              CLUSTER_ENDPOINT=$(gcloud container clusters describe ${CLUSTER_NAME} --region=${REGION} --project=${PROJECT_ID} --format="value(endpoint)")
+              CLUSTER_CA=$(gcloud container clusters describe ${CLUSTER_NAME} --region=${REGION} --project=${PROJECT_ID} --format="value(masterAuth.clusterCaCertificate)")
+              TOKEN=$(gcloud auth print-access-token)
+              mkdir -p $(dirname ${KUBECONFIG})
+              cat > ${KUBECONFIG} <<EOF
+apiVersion: v1
+kind: Config
+clusters:
+- cluster:
+    certificate-authority-data: ${CLUSTER_CA}
+    server: https://${CLUSTER_ENDPOINT}
+  name: ${CLUSTER_NAME}
+contexts:
+- context:
+    cluster: ${CLUSTER_NAME}
+    user: ${CLUSTER_NAME}
+  name: ${CLUSTER_NAME}
+current-context: ${CLUSTER_NAME}
+users:
+- name: ${CLUSTER_NAME}
+  user:
+    token: ${TOKEN}
+EOF
+            }
+
+            # Validate kubeconfig using explicit kubectl from workspace/bin
             ${WORK_BIN}/kubectl --kubeconfig=${KUBECONFIG} cluster-info || true
+            echo "Kubeconfig written to ${KUBECONFIG}"
           '''
         }
       }
@@ -181,7 +199,7 @@ EOF
           if (exists == '') {
             env.EFFECTIVE_ACTION = 'ROLLOUT'
             env.EFFECTIVE_VERSION = 'v1.0'
-            echo "FIRST RUN detected -> forcing ROLLOUT of v1.0"
+            echo "FIRST RUN -> forcing ROLLOUT v1.0"
           } else {
             env.EFFECTIVE_ACTION = params.DEPLOYMENT_ACTION
             env.EFFECTIVE_VERSION = params.VERSION
@@ -197,8 +215,9 @@ EOF
       steps {
         sh '''
           set -e
+          export PATH="${WORK_BIN}:${PATH}"
           export KUBECONFIG=${KUBECONFIG}
-          KUBECTL=${WORKSPACE}/bin/kubectl
+          KUBECTL=${WORK_BIN}/kubectl
 
           ${KUBECTL} create namespace java-app --dry-run=client -o yaml | ${KUBECTL} apply -f -
           ${KUBECTL} apply -f ${YAML_DIR}/configmap.yaml -n java-app --validate=false || true
@@ -213,7 +232,7 @@ EOF
       steps {
         script {
           def kubeconf = env.KUBECONFIG
-          def KUBECTL = "${env.WORKSPACE}/bin/kubectl"
+          def KUBECTL = "${env.WORK_BIN}/kubectl"
           def cidr = params.ALLOWED_IP_CIDR ?: '0.0.0.0/0'
           def imageToUse = (env.EFFECTIVE_VERSION == 'v1.0') ? env.GAR_IMAGE_V1 : env.GAR_IMAGE_V2
           def ver = env.EFFECTIVE_VERSION
@@ -222,6 +241,7 @@ EOF
           sh(
             '''
               set -e
+              export PATH="${WORK_BIN}:${PATH}"
               export KUBECONFIG=''' + kubeconf + '''
               KUBECTL=''' + KUBECTL + '''
               CIDR=''' + cidr + '''
@@ -229,15 +249,13 @@ EOF
               VER=''' + ver + '''
               ACTION=''' + action + '''
 
-              echo "Performing ${ACTION} for ${VER} using image ${IMAGE}"
+              echo "Performing ${ACTION} for ${VER} using ${IMAGE}"
 
               cp ${YAML_DIR}/deployment.yaml /tmp/deployment-${VER}.yaml
               sed -i "s|IMAGE_PLACEHOLDER|${IMAGE}|g" /tmp/deployment-${VER}.yaml
               sed -i "s|VERSION_PLACEHOLDER|${VER}|g" /tmp/deployment-${VER}.yaml
 
               ${KUBECTL} apply -f /tmp/deployment-${VER}.yaml -n java-app --validate=false || true
-
-              # patch ingress to whitelist CIDR (nginx ingress). Adjust for your ingress controller if needed.
               ${KUBECTL} patch ingress java-app-ingress -n java-app --type='merge' -p '{"metadata":{"annotations":{"nginx.ingress.kubernetes.io/whitelist-source-range":"'${CIDR}'"}}}' || echo "Ingress patch skipped/failed"
 
               if [ "${ACTION}" = "ROLLOUT" ]; then
@@ -245,7 +263,7 @@ EOF
                 if ${KUBECTL} rollout status deployment/java-gradle-app -n java-app --timeout=600s; then
                   echo "Rollout succeeded."
                 else
-                  echo "Rollout timed out/failed - collecting debug info"
+                  echo "Rollout failed - collecting debug info"
                   ${KUBECTL} describe deployment java-gradle-app -n java-app || true
                   ${KUBECTL} get pods -n java-app -o wide || true
                   for P in $(${KUBECTL} get pods -l app=java-gradle-app -n java-app -o name 2>/dev/null || echo ""); do
@@ -270,8 +288,9 @@ EOF
       steps {
         sh '''
           set -e
+          export PATH="${WORK_BIN}:${PATH}"
           export KUBECONFIG=${KUBECONFIG}
-          KUBECTL=${WORKSPACE}/bin/kubectl
+          KUBECTL=${WORK_BIN}/kubectl
 
           echo "=== DEPLOYMENT ==="
           ${KUBECTL} get deployment java-gradle-app -n java-app -o wide || true
@@ -290,7 +309,7 @@ EOF
               echo "Homepage responded (first 20 lines):"
               curl -s http://$IP/ | head -n 20
             else
-              echo "Could not fetch homepage from agent. Ensure agent IP (or Jenkins controller) is allowed by ALLOWED_IP_CIDR"
+              echo "Could not fetch homepage from agent. Ensure the agent IP (or Jenkins controller) is allowed by ALLOWED_IP_CIDR"
             fi
           fi
         '''
@@ -312,13 +331,7 @@ EOF
       }
       sh 'rm -f /tmp/deployment-v1.0.yaml /tmp/deployment-v2.0.yaml 2>/dev/null || true'
     }
-
-    success {
-      echo "Pipeline completed successfully."
-    }
-
-    failure {
-      echo "Pipeline failed — inspect logs for details (image build/push, kubeconfig, quota, readiness, pod events)."
-    }
+    success { echo "Pipeline completed successfully." }
+    failure { echo "Pipeline failed — inspect logs for details." }
   }
 }
