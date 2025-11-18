@@ -174,20 +174,25 @@ EOF
             else
               LIMIT=$(echo $QLINE | awk '{print $1}')
               USAGE=$(echo $QLINE | awk '{print $2}')
-              AVAIL_M=$(python3 - <<PY
+              if [ -z "$LIMIT" ] || [ -z "$USAGE" ]; then
+                echo "Empty LIMIT or USAGE -> SAFE mode"
+                echo "USE_SAFE=1" > /tmp/decide_mode
+              else
+                AVAIL_M=$(python3 - <<PY
 limit=${LIMIT}
 usage=${USAGE}
 avail = float(limit) - float(usage)
 print(int(avail*1000))
 PY
 )
-              echo "CPUs limit=${LIMIT}, usage=${USAGE}, avail_m=${AVAIL_M}"
-              if [ ${AVAIL_M} -lt ${REQ_TOTAL_M} ]; then
-                echo "Not enough CPU quota (${AVAIL_M}m < ${REQ_TOTAL_M}m) -> SAFE"
-                echo "USE_SAFE=1" > /tmp/decide_mode
-              else
-                echo "Quota sufficient -> NORMAL"
-                echo "USE_SAFE=0" > /tmp/decide_mode
+                echo "CPUs limit=${LIMIT}, usage=${USAGE}, avail_m=${AVAIL_M}"
+                if [ ${AVAIL_M} -lt ${REQ_TOTAL_M} ]; then
+                  echo "Not enough CPU quota (${AVAIL_M}m < ${REQ_TOTAL_M}m) -> SAFE"
+                  echo "USE_SAFE=1" > /tmp/decide_mode
+                else
+                  echo "Quota sufficient -> NORMAL"
+                  echo "USE_SAFE=0" > /tmp/decide_mode
+                fi
               fi
             fi
             cat /tmp/decide_mode || true
