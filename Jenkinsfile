@@ -2,24 +2,19 @@ pipeline {
   agent any
 
   parameters {
-    choice(
-      name: 'DEPLOYMENT_ACTION',
-      choices: ['ROLLOUT', 'ROLLBACK'],
-      description: 'Choose deployment action (ignored on first run; first run auto-deploys v1.0)'
-    )
-    choice(
-      name: 'VERSION',
-      choices: ['v1.0', 'v2.0'],
-      description: 'Choose version to deploy (ignored on first run)'
-    )
+    choice(name: 'DEPLOYMENT_ACTION',
+           choices: ['ROLLOUT', 'ROLLBACK'],
+           description: 'Choose deployment action (ignored on first run; first run auto-deploys v1.0)')
+    choice(name: 'VERSION',
+           choices: ['v1.0', 'v2.0'],
+           description: 'Choose version to deploy (ignored on first run)')
   }
 
   environment {
-    PROJECT_ID = 'planar-door-476510-m1'           // <-- set your project
+    PROJECT_ID = 'planar-door-476510-m1'          // <-- adjust
     REGION = 'us-central1'
     GAR_REPO = 'java-app'
     IMAGE_NAME = "java-app"
-    // tags include build number so each build produces unique images
     V1_TAG = "v1.0-${env.BUILD_NUMBER}"
     V2_TAG = "v2.0-${env.BUILD_NUMBER}"
     GAR_HOST = "${env.REGION}-docker.pkg.dev"
@@ -27,7 +22,7 @@ pipeline {
     GAR_IMAGE_V2 = "${env.GAR_HOST}/${env.PROJECT_ID}/${env.GAR_REPO}/${env.IMAGE_NAME}:${env.V2_TAG}"
     CLUSTER_NAME = "autopilot-demo"
     KUBECONFIG = "${env.WORKSPACE}/.kube/config"
-    // Replace this with the allowed client IP (or CIDR) that should be able to access the app
+    // Replace with the CIDR you want to allow (or store in Jenkins credential)
     ALLOWED_IP_CIDR = '203.0.113.5/32'
   }
 
@@ -39,7 +34,7 @@ pipeline {
           git clone https://github.com/Nagasai634/k8s-Usecase.git || true
           cd k8s-Usecase/java-gradle
           rm -f src/main/java/com/example/demo/VersionController.java 2>/dev/null || true
-          chmod +x ./gradlew
+          chmod +x ./gradlew || true
         '''
       }
     }
@@ -47,11 +42,16 @@ pipeline {
     stage('Setup Tools') {
       steps {
         sh '''
+          set -e
           mkdir -p "${WORKSPACE}/bin"
-          curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-          chmod +x ./kubectl
-          mv ./kubectl "${WORKSPACE}/bin/"
-          export PATH="${WORKSPACE}/bin:${PATH}"
+          # download kubectl if not present or version mismatch
+          if [ ! -x "${WORKSPACE}/bin/kubectl" ]; then
+            KVER=$(curl -L -s https://dl.k8s.io/release/stable.txt)
+            curl -L --fail "https://dl.k8s.io/release/${KVER}/bin/linux/amd64/kubectl" -o "${WORKSPACE}/bin/kubectl"
+            chmod +x "${WORKSPACE}/bin/kubectl"
+          fi
+          # sanity
+          "${WORKSPACE}/bin/kubectl" version --client || true
         '''
       }
     }
@@ -61,11 +61,9 @@ pipeline {
         sh '''
           set -e
           cd k8s-Usecase/java-gradle
-
-          # ensure static index exists for each version and build, tag & push
           mkdir -p src/main/resources/static
 
-          # v1 content
+          # v1
           cat > src/main/resources/static/index.html <<'EOF'
 <!DOCTYPE html><html><head><title>V1.0</title></head><body><h1>Version 1.0 - BLUE</h1></body></html>
 EOF
@@ -73,7 +71,7 @@ EOF
           docker build -t ${GAR_IMAGE_V1} .
           docker push ${GAR_IMAGE_V1}
 
-          # v2 content (overwrite index and build again)
+          # v2
           cat > src/main/resources/static/index.html <<'EOF'
 <!DOCTYPE html><html><head><title>V2.0</title></head><body><h1>Version 2.0 - GREEN</h1></body></html>
 EOF
@@ -88,7 +86,7 @@ EOF
       steps {
         withCredentials([file(credentialsId: 'gcp-service-account-key', variable: 'GCP_SA_KEYFILE')]) {
           sh '''
-            export PATH="${WORKSPACE}/bin:${PATH}"
+            set -e
             export KUBECONFIG=${KUBECONFIG}
 
             gcloud auth activate-service-account --key-file="$GCP_SA_KEYFILE"
@@ -119,7 +117,8 @@ users:
     token: ${TOKEN}
 EOF
 
-            kubectl cluster-info --kubeconfig=${KUBECONFIG}
+            # quick validation using explicit kubectl path
+            "${WORKSPACE}/bin/kubectl" cluster-info --kubeconfig=${KUBECONFIG}
           '''
         }
       }
@@ -128,7 +127,8 @@ EOF
     stage('Decide Action (first-run detection)') {
       steps {
         script {
-          def exists = sh(script: "kubectl get deploy java-gradle-app -n java-app --kubeconfig=${KUBECONFIG} --ignore-not-found=true --no-headers -o name || true", returnStdout: true).trim()
+          // Use explicit kubectl path to avoid PATH problems
+          def exists = sh(script: "\"${env.WORKSPACE}/bin/kubectl\" get deploy java-gradle-app -n java-app --kubeconfig=${env.KUBECONFIG} --ignore-not-found=true --no-headers -o name || true", returnStdout: true).trim()
           boolean deployedBefore = exists != ''
           if (!deployedBefore) {
             echo "No existing deployment detected -> FIRST RUN. Forcing ROLLOUT of v1.0"
@@ -148,62 +148,60 @@ EOF
     stage('Apply Configs & Perform Action') {
       steps {
         script {
-          // precompute values in Groovy (interpolation happens here, not inside a big GString)
-          def effectiveImage = (env.EFFECTIVE_VERSION == 'v1.0') ? env.GAR_IMAGE_V1 : env.GAR_IMAGE_V2
+          // precompute image and cidr in Groovy (safe interpolation here)
+          def imageToUse = (env.EFFECTIVE_VERSION == 'v1.0') ? env.GAR_IMAGE_V1 : env.GAR_IMAGE_V2
           def cidr = env.ALLOWED_IP_CIDR
           def kubeconf = env.KUBECONFIG
+          def KUBECTL = "${env.WORKSPACE}/bin/kubectl"
 
-          // Apply common resources via multi-line shell (safe; no problematic ${...} left)
+          // Apply namespace & static resources
           sh """
-            export PATH="${WORKSPACE}/bin:${PATH}"
-            export KUBECONFIG=${kubeconf}
             set -e
-
-            kubectl create namespace java-app --dry-run=client -o yaml | kubectl apply -f -
-
-            # apply the static yaml files you already have
-            kubectl apply -f k8s-Usecase/configmap.yaml -n java-app --validate=false || true
-            kubectl apply -f k8s-Usecase/hpa.yaml -n java-app --validate=false || true
-            kubectl apply -f k8s-Usecase/service.yaml -n java-app --validate=false || true
-            kubectl apply -f k8s-Usecase/ingress.yaml -n java-app --validate=false || true
+            export KUBECONFIG=${kubeconf}
+            ${KUBECTL} create namespace java-app --dry-run=client -o yaml | ${KUBECTL} apply -f -
+            ${KUBECTL} apply -f k8s-Usecase/configmap.yaml -n java-app --validate=false || true
+            ${KUBECTL} apply -f k8s-Usecase/hpa.yaml -n java-app --validate=false || true
+            ${KUBECTL} apply -f k8s-Usecase/service.yaml -n java-app --validate=false || true
+            ${KUBECTL} apply -f k8s-Usecase/ingress.yaml -n java-app --validate=false || true
           """
 
           if (env.EFFECTIVE_ACTION == 'ROLLOUT') {
-            // prepare deployment file and apply
-            sh """
-              cp k8s-Usecase/deployment.yaml /tmp/deployment-${env.EFFECTIVE_VERSION}.yaml
-              sed -i "s|IMAGE_PLACEHOLDER|${effectiveImage}|g" /tmp/deployment-${env.EFFECTIVE_VERSION}.yaml
-              sed -i "s|VERSION_PLACEHOLDER|${env.EFFECTIVE_VERSION}|g" /tmp/deployment-${env.EFFECTIVE_VERSION}.yaml
-              kubectl apply -f /tmp/deployment-${env.EFFECTIVE_VERSION}.yaml -n java-app --validate=false
-            """
-
-            // Build the kubectl patch command in Groovy to avoid Groovy parser issues
-            def patchCmd = "kubectl patch ingress java-app-ingress -n java-app --type='merge' -p '{\"metadata\":{\"annotations\":{\"nginx.ingress.kubernetes.io/whitelist-source-range\":\"${cidr}\"}}}' || echo \"Ingress patch failed (maybe ingress not present or controller differs) - please adjust ALLOWED_IP_CIDR annotation for your ingress controller.\""
-            sh patchCmd
-
-            // Wait for rollout and dump debug info on failure
+            // prepare and apply deployment
             sh """
               set -e
-              if kubectl rollout status deployment/java-gradle-app -n java-app --timeout=600s; then
+              cp k8s-Usecase/deployment.yaml /tmp/deployment-${env.EFFECTIVE_VERSION}.yaml
+              sed -i "s|IMAGE_PLACEHOLDER|${imageToUse}|g" /tmp/deployment-${env.EFFECTIVE_VERSION}.yaml
+              sed -i "s|VERSION_PLACEHOLDER|${env.EFFECTIVE_VERSION}|g" /tmp/deployment-${env.EFFECTIVE_VERSION}.yaml
+              ${KUBECTL} apply -f /tmp/deployment-${env.EFFECTIVE_VERSION}.yaml -n java-app --validate=false
+            """
+
+            // build patch command in Groovy to avoid Groovy parser problems and then execute it
+            def patchCmd = "${KUBECTL} patch ingress java-app-ingress -n java-app --type='merge' -p '{\"metadata\":{\"annotations\":{\"nginx.ingress.kubernetes.io/whitelist-source-range\":\"${cidr}\"}}}' || echo \"Ingress patch failed (maybe ingress not present or controller differs) - please adjust ALLOWED_IP_CIDR annotation for your ingress controller.\""
+            sh patchCmd
+
+            // wait for rollout (debug on failure)
+            sh """
+              set -e
+              if ${KUBECTL} rollout status deployment/java-gradle-app -n java-app --timeout=600s; then
                 echo "Rollout succeeded"
               else
-                echo "Rollout timed out or failed - dumping debug info"
-                kubectl describe deployment java-gradle-app -n java-app || true
-                kubectl get pods -n java-app -o wide || true
-                for P in \$(kubectl get pods -n java-app -l app=java-gradle-app -o name 2>/dev/null || echo ""); do
+                echo "Rollout timed out/failed - dumping debug info"
+                ${KUBECTL} describe deployment java-gradle-app -n java-app || true
+                ${KUBECTL} get pods -n java-app -o wide || true
+                for P in \$(${KUBECTL} get pods -n java-app -l app=java-gradle-app -o name 2>/dev/null || echo ""); do
                   echo "=== Logs for \${P} ==="
-                  kubectl logs -n java-app \${P} --tail=100 || true
+                  ${KUBECTL} logs -n java-app \${P} --tail=100 || true
                 done
-                kubectl get events -n java-app --sort-by=.lastTimestamp | tail -n 40 || true
+                ${KUBECTL} get events -n java-app --sort-by=.lastTimestamp | tail -n 40 || true
                 exit 1
               fi
             """
           } else {
-            // rollback
+            // rollback path
             sh """
               set -e
-              kubectl rollout undo deployment/java-gradle-app -n java-app || { echo "Rollback failed"; exit 1; }
-              kubectl rollout status deployment/java-gradle-app -n java-app --timeout=300s || { echo "Rollback status wait failed"; exit 1; }
+              ${KUBECTL} rollout undo deployment/java-gradle-app -n java-app || { echo "Rollback failed"; exit 1; }
+              ${KUBECTL} rollout status deployment/java-gradle-app -n java-app --timeout=300s || { echo "Rollback status wait failed"; exit 1; }
             """
           }
         }
@@ -213,18 +211,19 @@ EOF
     stage('Verify Deployment & Homepage') {
       steps {
         sh '''
-          export PATH="${WORKSPACE}/bin:${PATH}"
+          set -e
+          KUBECTL="${WORKSPACE}/bin/kubectl"
           export KUBECONFIG=${KUBECONFIG}
 
           echo "=== DEPLOYMENT ==="
-          kubectl get deployment java-gradle-app -n java-app -o wide || true
-          kubectl get pods -l app=java-gradle-app -n java-app -o wide || true
+          ${KUBECTL} get deployment java-gradle-app -n java-app -o wide || true
+          ${KUBECTL} get pods -l app=java-gradle-app -n java-app -o wide || true
 
           echo "=== SERVICE & INGRESS ==="
-          kubectl get svc -n java-app || true
-          kubectl get ingress java-app-ingress -n java-app -o yaml || true
+          ${KUBECTL} get svc -n java-app || true
+          ${KUBECTL} get ingress java-app-ingress -n java-app -o yaml || true
 
-          IP=$(kubectl get ingress java-app-ingress -n java-app -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
+          IP=$(${KUBECTL} get ingress java-app-ingress -n java-app -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
           if [ -z "$IP" ]; then
             echo "Ingress IP not available yet (pending)."
           else
@@ -253,15 +252,9 @@ EOF
         echo "Build number: ${env.BUILD_NUMBER}"
         echo "Status: ${currentResult}"
       }
-      sh '''
-        rm -f /tmp/deployment-v1.0.yaml /tmp/deployment-v2.0.yaml 2>/dev/null || true
-      '''
+      sh 'rm -f /tmp/deployment-v1.0.yaml /tmp/deployment-v2.0.yaml 2>/dev/null || true'
     }
-    success {
-      echo "Pipeline completed successfully."
-    }
-    failure {
-      echo "Pipeline failed. Check logs above for details."
-    }
+    success { echo "Pipeline completed successfully." }
+    failure { echo "Pipeline failed. Check logs above for details." }
   }
 }
