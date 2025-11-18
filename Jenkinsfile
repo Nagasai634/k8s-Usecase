@@ -14,13 +14,14 @@ pipeline {
   }
 
   environment {
-    // edit these values for your environment
+    // Update for your environment
     PROJECT_ID = 'planar-door-476510-m1'
     REGION = 'us-central1'
     CLUSTER_NAME = 'autopilot-demo'
     GAR_REPO = 'java-app'
     IMAGE_NAME = 'java-app'
-    // derived
+
+    // Derived
     WORKSPACE_BIN = "${env.WORKSPACE}/bin"
     GAR_HOST = "${env.REGION}-docker.pkg.dev"
     V1_TAG = "v1.0-${env.BUILD_NUMBER}"
@@ -29,7 +30,7 @@ pipeline {
     GAR_IMAGE_V2 = "${env.GAR_HOST}/${env.PROJECT_ID}/${env.GAR_REPO}/${env.IMAGE_NAME}:${env.V2_TAG}"
     KUBECONFIG = "${env.WORKSPACE}/.kube/config"
 
-    // safe-mode defaults
+    // Safe-mode defaults
     DEFAULT_DESIRED_REPLICAS = "3"
     SAFE_REPLICAS = "1"
     SAFE_REQUEST_CPU = "100m"
@@ -39,18 +40,6 @@ pipeline {
   }
 
   stages {
-    stage('Clean & Checkout') {
-      steps {
-        cleanWs()
-        sh '''
-          set -e
-          git clone https://github.com/Nagasai634/k8s-Usecase.git || true
-          cd k8s-Usecase/java-gradle || true
-          chmod +x ./gradlew || true
-        '''
-      }
-    }
-
     stage('Ensure Tools') {
       steps {
         sh '''
@@ -61,7 +50,7 @@ pipeline {
             curl -fsSL "https://dl.k8s.io/release/${KVER}/bin/linux/amd64/kubectl" -o "${WORKSPACE_BIN}/kubectl"
             chmod +x "${WORKSPACE_BIN}/kubectl"
           fi
-          echo "kubectl client:"
+          echo "kubectl (client):"
           "${WORKSPACE_BIN}/kubectl" version --client || true
 
           if command -v docker >/dev/null 2>&1; then
@@ -85,6 +74,7 @@ pipeline {
             gcloud config set project ${PROJECT_ID}
             gcloud auth configure-docker ${GAR_HOST} --quiet || true
 
+            # assume repo already checked out into workspace and contains k8s-Usecase/java-gradle
             cd k8s-Usecase/java-gradle
             mkdir -p src/main/resources/static
 
@@ -376,7 +366,7 @@ PY
       echo "Pipeline completed successfully."
     }
     failure {
-      echo "Pipeline failed. Check the logs (quota, readiness probe, pod events, image availability)."
+      echo "Pipeline failed. Inspect logs for quota, readiness, pod events, or image push errors."
     }
   }
 }
