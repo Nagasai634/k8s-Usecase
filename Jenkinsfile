@@ -14,7 +14,7 @@ pipeline {
   }
 
   environment {
-    // Update for your environment
+    // EDIT these for your environment
     PROJECT_ID = 'planar-door-476510-m1'
     REGION = 'us-central1'
     CLUSTER_NAME = 'autopilot-demo'
@@ -148,7 +148,7 @@ EOF
 
             DESIRED=${DEFAULT_DESIRED_REPLICAS}
             REQ_PER_POD_M=250
-            REQ_TOTAL_M=$(expr ${DESIRED} \* ${REQ_PER_POD_M})
+            REQ_TOTAL_M=$((DESIRED * REQ_PER_POD_M))
 
             Q=$(gcloud compute regions describe ${REGION} --project=${PROJECT_ID} --format="value(quotas[?metric=='CPUS'].limit,quotas[?metric=='CPUS'].usage)" || echo "")
             if [ -z "$Q" ]; then
