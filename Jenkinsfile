@@ -1,3 +1,38 @@
+<think>
+The error is in the pipeline script at line 297: illegal string body character after dollar sign; solution: either escape a literal dollar sign "\$5" or bracket the value expression "${5}"
+
+
+## Troubleshooting script error  
+- Found an error in the pipeline script at line 297: an illegal string body character appears after a dollar sign.  
+- The issue can be fixed by either escaping the dollar sign with a backslash, like "\$5", or bracketing the value expression, like "${5}".
+
+## Investigating code details  
+- Found the issue in the 'Perform Action' stage, within an sh block using Groovy triple double quotes """.  
+- The variable ${KUBECTL} inside the string is being interpolated by Groovy, causing errors in shell command substitution.  
+
+## Examining error location  
+- The error at line 297 likely stems from commands like ${KUBECTL} get pods -n java-app -o wide || true in the debug section.  
+- Noticed a for loop using $(${KUBECTL} get pods...), where Groovy's interpolation conflicts with shell execution.  
+
+## Proposing a fix  
+- To resolve, need to escape dollar signs properly in the Groovy multi-line string to prevent interpolation.  
+- This ensures ${KUBECTL} is treated as a literal in shell commands, avoiding the illegal character error.
+
+## Examining error specifics  
+- The error at line 297, column 26, suggests an issue with unescaped dollar signs in the sh block.  
+- The conflict arises because ${KUBECTL} is interpolated by Groovy before shell execution, causing an illegal string body character error.
+
+## Refining the fix approach  
+- In the for loop, ${KUBECTL} inside $(...) is interpolated by Groovy, then processed as shell command substitution.  
+- To fix, need to ensure dollar signs are escaped or the string is properly quoted to avoid Groovy interpolation conflicts with shell syntax.
+
+## Refining the fix approach
+- Groovy's interpolation interprets $ as the start of a variable, causing errors with shell $(command) syntax.
+- Escaping $ with \$, like in \$(${KUBECTL} ...), ensures shell command substitution works without Groovy interference.
+
+## Addressing variable conflicts
+- In the sh block, ${P} is interpolated by Groovy, but P is a shell variable, creating conflicts.
+</think>```groovy
 pipeline {
   agent any
 
@@ -295,9 +330,9 @@ PY
                 echo "Rollout timed out/failed - collecting debug info"
                 ${KUBECTL} describe deployment java-gradle-app -n java-app || true
                 ${KUBECTL} get pods -n java-app -o wide || true
-                for P in $(${KUBECTL} get pods -n java-app -l app=java-gradle-app -o name 2>/dev/null || echo ""); do
-                  echo "=== LOGS for ${P} ==="
-                  ${KUBECTL} logs -n java-app ${P} --tail=200 || true
+                for P in \$(${KUBECTL} get pods -n java-app -l app=java-gradle-app -o name 2>/dev/null || echo ""); do
+                  echo "=== LOGS for \${P} ==="
+                  ${KUBECTL} logs -n java-app \${P} --tail=200 || true
                 done
                 ${KUBECTL} get events -n java-app --sort-by=.lastTimestamp | tail -n 80 || true
                 exit 1
@@ -332,12 +367,12 @@ PY
           ${KUBECTL} get svc -n java-app || true
           ${KUBECTL} get ingress java-app-ingress -n java-app -o yaml || true
 
-          IP=$(${KUBECTL} get ingress java-app-ingress -n java-app -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
-          if [ -z "$IP" ]; then
+          IP=\$(${KUBECTL} get ingress java-app-ingress -n java-app -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
+          if [ -z "\$IP" ]; then
             echo "Ingress IP not available yet."
           else
-            echo "Ingress IP: $IP"
-            if curl -s --connect-timeout 5 http://$IP/ | head -n 10; then
+            echo "Ingress IP: \$IP"
+            if curl -s --connect-timeout 5 http://\$IP/ | head -n 10; then
               echo "Homepage fetched successfully."
             else
               echo "Could not fetch homepage from agent. If agent IP not allowed by ALLOWED_IP_CIDR, test from allowed client."
@@ -370,3 +405,4 @@ PY
     }
   }
 }
+```
