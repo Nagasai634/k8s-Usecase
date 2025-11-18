@@ -19,14 +19,14 @@ pipeline {
   }
 
   environment {
-    // EDIT these for your environment
+    # — Edit these to match your environment —
     PROJECT_ID = 'planar-door-476510-m1'
     REGION = 'us-central1'
     CLUSTER_NAME = 'autopilot-demo'
     GAR_REPO = 'java-app'
     IMAGE_NAME = 'java-app'
 
-    // Derived
+    # Derived
     WORKSPACE_BIN = "${env.WORKSPACE}/bin"
     GAR_HOST = "${env.REGION}-docker.pkg.dev"
     V1_TAG = "v1.0-${env.BUILD_NUMBER}"
@@ -35,7 +35,7 @@ pipeline {
     GAR_IMAGE_V2 = "${env.GAR_HOST}/${env.PROJECT_ID}/${env.GAR_REPO}/${env.IMAGE_NAME}:${env.V2_TAG}"
     KUBECONFIG = "${env.WORKSPACE}/.kube/config"
 
-    // Safe-mode defaults
+    # Safe-mode defaults
     DEFAULT_DESIRED_REPLICAS = "3"
     SAFE_REPLICAS = "1"
     SAFE_REQUEST_CPU = "100m"
@@ -83,7 +83,7 @@ pipeline {
             gcloud config set project ${PROJECT_ID}
             gcloud auth configure-docker ${GAR_HOST} --quiet || true
 
-            # locate java-gradle dir
+            # locate java-gradle dir if present
             if [ -d "k8s-Usecase/java-gradle" ]; then
               cd k8s-Usecase/java-gradle
             elif [ -d "java-gradle" ]; then
@@ -114,15 +114,18 @@ EOF
       }
     }
 
-    stage('Authenticate to GKE') {
+    stage('Authenticate to GKE (with token injection)') {
       steps {
         withCredentials([file(credentialsId: 'gcp-service-account-key', variable: 'GCP_SA_KEYFILE')]) {
           sh '''
             set -e
             export GOOGLE_APPLICATION_CREDENTIALS="${GCP_SA_KEYFILE}"
+
+            # Activate SA and set project
             gcloud auth activate-service-account --key-file="${GOOGLE_APPLICATION_CREDENTIALS}"
             gcloud config set project ${PROJECT_ID}
 
+            # Attempt to fetch cluster credentials
             if gcloud container clusters get-credentials ${CLUSTER_NAME} --region=${REGION} --project=${PROJECT_ID} --quiet; then
               mkdir -p "$(dirname ${KUBECONFIG})"
               "${WORKSPACE_BIN}/kubectl" config view --raw > "${KUBECONFIG}" || true
@@ -130,6 +133,24 @@ EOF
             else
               echo "gcloud get-credentials failed. Will mark SKIP_K8S=true and continue pipeline without k8s operations."
               echo "SKIP_K8S=true" > /tmp/jenkins_skip_k8s
+            fi
+
+            # Inject explicit access token into kubeconfig to avoid anonymous/auth-plugin issues
+            if [ ! -f /tmp/jenkins_skip_k8s ]; then
+              ACCESS_TOKEN=$(gcloud auth print-access-token || echo "")
+              if [ -n "$ACCESS_TOKEN" ]; then
+                CTX=$("${WORKSPACE_BIN}/kubectl" --kubeconfig="${KUBECONFIG}" config current-context 2>/dev/null || echo "")
+                if [ -n "$CTX" ]; then
+                  TOKEN_USER="jenkins-gcp-sa-token"
+                  "${WORKSPACE_BIN}/kubectl" --kubeconfig="${KUBECONFIG}" config set-credentials "${TOKEN_USER}" --token="$ACCESS_TOKEN" || true
+                  "${WORKSPACE_BIN}/kubectl" --kubeconfig="${KUBECONFIG}" config set-context "$CTX" --user="${TOKEN_USER}" || true
+                  echo "Injected access token into kubeconfig as user ${TOKEN_USER} for context ${CTX}."
+                else
+                  echo "No current context found; skipping token injection."
+                fi
+              else
+                echo "Could not obtain access token from gcloud; will rely on kubeconfig auth-provider (may fail on CI agents)."
+              fi
             fi
           '''
         }
@@ -150,7 +171,7 @@ EOF
               env.SKIP_K8S = 'false'
             } else {
               echo "kubectl authentication failed (auth check returned NO). Setting SKIP_K8S=true."
-              echo "If this is unexpected, ensure the GCP service account has appropriate IAM roles (e.g. roles/container.admin or roles/container.developer) and the cluster is reachable."
+              echo "If this is unexpected, ensure the GCP service account has a ClusterRoleBinding or appropriate RBAC."
               env.SKIP_K8S = 'true'
             }
           }
@@ -163,7 +184,6 @@ EOF
         script {
           env.EFFECTIVE_ACTION = ''
           env.EFFECTIVE_VERSION = ''
-
           if (env.SKIP_K8S == 'false') {
             echo "Attempting first-run detection against cluster..."
             def exists = sh(script: """${WORKSPACE_BIN}/kubectl --kubeconfig=${KUBECONFIG} -n java-app get deploy java-gradle-app --ignore-not-found=true --no-headers -o name || true""", returnStdout: true).trim()
@@ -244,13 +264,13 @@ PY
           export KUBECONFIG="${KUBECONFIG}"
           KUBECTL="${WORKSPACE_BIN}/kubectl"
 
-          ${KUBECTL} create namespace java-app --dry-run=client -o yaml | ${KUBECTL} apply -f - --validate=false || echo "Namespace creation skipped/failed"
+          ${KUBECTL} create namespace java-app --dry-run=client -o yaml | ${KUBECTL} apply -f - --validate=false || echo "Namespace skipped/failed"
           ${KUBECTL} apply -f k8s-Usecase/configmap.yaml -n java-app --validate=false || true
           ${KUBECTL} apply -f k8s-Usecase/service.yaml -n java-app --validate=false || true
           ${KUBECTL} apply -f k8s-Usecase/ingress.yaml -n java-app --validate=false || true
           ${KUBECTL} apply -f k8s-Usecase/hpa.yaml -n java-app --validate=false || true
 
-          # Determine service name (by label) - adjust selector if your service uses a different label
+          # Find service by label (adjust if your service uses different labels)
           SVC=$(${KUBECTL} -n java-app get svc -l app=java-gradle-app -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
           if [ -n "$SVC" ]; then
             TYPE=$(${KUBECTL} -n java-app get svc "$SVC" -o jsonpath='{.spec.type}')
@@ -260,10 +280,9 @@ PY
               ${KUBECTL} -n java-app patch svc "$SVC" -p '{"spec":{"type":"LoadBalancer"}}' || echo "svc patch failed"
             fi
           else
-            echo "Could not detect service with label app=java-gradle-app. Skipping automatic type patch. If your service name/label differ, update the pipeline selector."
+            echo "Could not detect service with label app=java-gradle-app. Skipping automatic type patch."
           fi
 
-          # Wait up to 5 minutes for external IP on service or ingress
           FOUND_IP=""
           for i in $(seq 1 60); do
             if [ -n "$SVC" ]; then
@@ -289,7 +308,6 @@ PY
       when { expression { env.SKIP_K8S != 'true' } }
       steps {
         script {
-          // Try to detect public IP of agent (best-effort); do not fail if unavailable
           def agentIp = ''
           try {
             agentIp = sh(script: "curl -s https://ifconfig.co || curl -s https://ifconfig.me || echo ''", returnStdout: true).trim()
@@ -299,23 +317,19 @@ PY
           if (agentIp) {
             echo "Detected agent public IP: ${agentIp}"
             env.AGENT_PUBLIC_IP = agentIp
-            // create a backup of the current annotation value so we can restore later
             sh '''
               set -e
               export KUBECONFIG="${KUBECONFIG}"
               KUBECTL="${WORKSPACE_BIN}/kubectl"
               ANNO=$( ${KUBECTL} -n java-app get ingress java-app-ingress -o jsonpath='{.metadata.annotations.nginx\\.ingress\\.kubernetes\\.io/whitelist-source-range}' 2>/dev/null || echo "" )
               echo "$ANNO" > /tmp/ingress_whitelist_before || true
-              # build new annotation: combine user-provided and agent ip (avoid duplicates)
               NEW="${params.ALLOWED_IP_CIDR}"
               if [ -n "$ANNO" ]; then
-                # append existing if not already present
                 case ",$ANNO," in
                   *,"${params.ALLOWED_IP_CIDR}",* ) ;; 
                   * ) NEW="$NEW,$ANNO" ;;
                 esac
               fi
-              # append agent ip if not already present
               case ",$NEW," in
                 *,"${AGENT_PUBLIC_IP}",* ) ;;
                 * ) NEW="$NEW,${AGENT_PUBLIC_IP}" ;;
@@ -324,7 +338,7 @@ PY
               ${KUBECTL} -n java-app patch ingress java-app-ingress --type='merge' -p "{\"metadata\":{\"annotations\":{\"nginx.ingress.kubernetes.io/whitelist-source-range\":\"${NEW}\"}}}" || echo "ingress patch failed"
             '''
           } else {
-            echo "Could not detect agent public IP automatically; skipping temporary ingress patch. If agent curl fails later, consider adding the agent IP to ALLOWED_IP_CIDR."
+            echo "Could not detect agent public IP; skipping temporary ingress patch."
           }
         }
       }
@@ -414,12 +428,11 @@ PY
               '''
             }
 
-            // patch ingress whitelist (ensure user's ALLOWED_IP_CIDR is present)
+            // ensure ALLOWED_IP_CIDR present in ingress annotation
             sh """
               set -e
               export KUBECONFIG="${KUBECONFIG}"
               KUBECTL="${WORKSPACE_BIN}/kubectl"
-              # Ensure the desired allowed CIDR is part of annotation (this won't remove agent IP if present)
               CUR=\$(${KUBECTL} -n java-app get ingress java-app-ingress -o jsonpath='{.metadata.annotations.nginx\\.ingress\\.kubernetes\\.io/whitelist-source-range}' 2>/dev/null || echo "")
               NEW="${params.ALLOWED_IP_CIDR}"
               if [ -n "\$CUR" ]; then
@@ -432,7 +445,6 @@ PY
               ${KUBECTL} -n java-app patch ingress java-app-ingress --type='merge' -p "{\"metadata\":{\"annotations\":{\"nginx.ingress.kubernetes.io/whitelist-source-range\":\"\$NEW\"}}}" || echo "Ingress whitelist patch skipped/failed"
             """
 
-            // wait for rollout or collect debug info on failure
             sh '''
               set -e
               export KUBECONFIG="${KUBECONFIG}"
@@ -530,7 +542,6 @@ PY
         echo "Build number: ${env.BUILD_NUMBER}"
         echo "Status: ${currentResult}"
       }
-      // restore ingress whitelist to what it was before the run (best-effort)
       sh '''
         set -e
         export KUBECONFIG="${KUBECONFIG}"
@@ -541,7 +552,6 @@ PY
             echo "Restoring original ingress whitelist: $OLD"
             ${KUBECTL} -n java-app patch ingress java-app-ingress --type='merge' -p "{\"metadata\":{\"annotations\":{\"nginx.ingress.kubernetes.io/whitelist-source-range\":\"$OLD\"}}}" || echo "restore ingress annotation failed"
           else
-            # if original was blank, remove annotation
             echo "Removing temporary whitelist annotation (original empty)"
             ${KUBECTL} -n java-app patch ingress java-app-ingress --type='json' -p '[{"op":"remove","path":"/metadata/annotations/nginx.ingress.kubernetes.io~1whitelist-source-range"}]' || echo "remove annotation failed or not present"
           fi
