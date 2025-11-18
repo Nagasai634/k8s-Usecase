@@ -1,5 +1,4 @@
-// Jenkinsfile - Build v1/v2 -> push to GAR -> Deploy to GKE Autopilot
-// Revised: do NOT rely on gke-gcloud-auth-plugin; create kubeconfig using endpoint/CA + access token.
+// Jenkinsfile - build v1/v2 -> push to GAR -> deploy to GKE Autopilot
 pipeline {
   agent any
 
@@ -112,7 +111,7 @@ DF
               return 0
             }
 
-            # ensure static pages exist (overwritten by app if compiled)
+            # ensure static pages exist
             cat > src/main/resources/static/index.html <<'EOF'
 <!DOCTYPE html><html><head><title>V1.0</title></head><body><h1>Version 1.0 - BLUE</h1></body></html>
 EOF
@@ -139,7 +138,6 @@ EOF
             gcloud auth activate-service-account --key-file="${GOOGLE_APPLICATION_CREDENTIALS}"
             gcloud config set project ${PROJECT_ID}
 
-            # fetch cluster endpoint and CA directly, build kubeconfig that uses access token
             CLUSTER_ENDPOINT=$(gcloud container clusters describe ${CLUSTER_NAME} --region=${REGION} --project=${PROJECT_ID} --format="value(endpoint)")
             CLUSTER_CA=$(gcloud container clusters describe ${CLUSTER_NAME} --region=${REGION} --project=${PROJECT_ID} --format="value(masterAuth.clusterCaCertificate)")
             TOKEN=$(gcloud auth print-access-token)
@@ -170,9 +168,53 @@ users:
     token: ${TOKEN}
 EOF
 
-            # quick validate (will use token auth)
             ${WORK_BIN}/kubectl --kubeconfig=${KUBECONFIG} cluster-info || true
             echo "Wrote token-based kubeconfig to ${KUBECONFIG}"
+          '''
+        }
+      }
+    }
+
+    stage('Check CPU Quota & Decide SAFE Mode') {
+      steps {
+        withCredentials([file(credentialsId: env.GCP_CRED_ID, variable: 'GCP_SA_KEYFILE')]) {
+          sh '''
+            set -e
+            export PATH="${WORK_BIN}:${PATH}"
+            export GOOGLE_APPLICATION_CREDENTIALS="${GCP_SA_KEYFILE}"
+            gcloud auth activate-service-account --key-file="${GOOGLE_APPLICATION_CREDENTIALS}"
+            gcloud config set project ${PROJECT_ID}
+
+            DESIRED=3
+            REQ_PER_POD_M=250
+            # use POSIX arithmetic - no backslashes to confuse Groovy parser
+            REQ_TOTAL_M=$((DESIRED * REQ_PER_POD_M))
+
+            # get CPU quota (limit and usage) for the region
+            Q=$(gcloud compute regions describe ${REGION} --project=${PROJECT_ID} --format="value(quotas[?metric=='CPUS'].limit,quotas[?metric=='CPUS'].usage)" || echo "")
+            if [ -z "$Q" ]; then
+              echo "Could not read CPUS quota -> SAFE mode"
+              echo "USE_SAFE=1" > /tmp/decide_mode
+            else
+              LIMIT=$(echo $Q | awk '{print $1}')
+              USAGE=$(echo $Q | awk '{print $2}')
+              AVAIL_M=$(python3 - <<PY
+limit=${LIMIT}
+usage=${USAGE}
+avail = float(limit) - float(usage)
+print(int(avail*1000))
+PY
+)
+              echo "CPUs limit=${LIMIT}, usage=${USAGE}, avail_m=${AVAIL_M}"
+              if [ ${AVAIL_M} -lt ${REQ_TOTAL_M} ]; then
+                echo "Not enough CPU quota (${AVAIL_M}m < ${REQ_TOTAL_M}m) -> SAFE"
+                echo "USE_SAFE=1" > /tmp/decide_mode
+              else
+                echo "Quota sufficient -> NORMAL"
+                echo "USE_SAFE=0" > /tmp/decide_mode
+              fi
+            fi
+            cat /tmp/decide_mode || true
           '''
         }
       }
@@ -257,4 +299,68 @@ EOF
                     echo "=== LOGS for ${P} ==="
                     ${KUBECTL} logs -n java-app ${P} --tail=200 || true
                   done
-                  ${KUBECTL} get
+                  ${KUBECTL} get events -n java-app --sort-by=.lastTimestamp | tail -n 80 || true
+                  exit 1
+                fi
+              else
+                echo "Performing rollback (rollout undo)"
+                ${KUBECTL} rollout undo deployment/java-gradle-app -n java-app || { echo "rollback failed"; exit 1; }
+                ${KUBECTL} rollout status deployment/java-gradle-app -n java-app --timeout=300s || { echo "rollback wait failed"; exit 1; }
+              fi
+            '''
+          )
+        }
+      }
+    }
+
+    stage('Verify & Test homepage') {
+      steps {
+        sh '''
+          set -e
+          export PATH="${WORK_BIN}:${PATH}"
+          export KUBECONFIG=${KUBECONFIG}
+          KUBECTL=${WORK_BIN}/kubectl
+
+          echo "=== DEPLOYMENT ==="
+          ${KUBECTL} get deployment java-gradle-app -n java-app -o wide || true
+          ${KUBECTL} get pods -l app=java-gradle-app -n java-app -o wide || true
+
+          echo "=== SERVICE & INGRESS ==="
+          ${KUBECTL} get svc -n java-app || true
+          ${KUBECTL} get ingress java-app-ingress -n java-app -o yaml || true
+
+          IP=$(${KUBECTL} get ingress java-app-ingress -n java-app -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
+          if [ -z "$IP" ]; then
+            echo "Ingress IP not available yet."
+          else
+            echo "Ingress IP: $IP"
+            if curl -s --connect-timeout 5 http://$IP/ | head -n 5; then
+              echo "Homepage responded (first 20 lines):"
+              curl -s http://$IP/ | head -n 20
+            else
+              echo "Could not fetch homepage from agent. Ensure agent IP (or Jenkins controller) is allowed by ALLOWED_IP_CIDR"
+            fi
+          fi
+        '''
+      }
+    }
+  }
+
+  post {
+    always {
+      script {
+        def currentResult = currentBuild.result ?: 'SUCCESS'
+        echo "=== PIPELINE SUMMARY ==="
+        echo "Requested action: ${params.DEPLOYMENT_ACTION}"
+        echo "Selected version: ${params.VERSION}"
+        echo "Effective action: ${env.EFFECTIVE_ACTION}"
+        echo "Effective version: ${env.EFFECTIVE_VERSION}"
+        echo "Build number: ${env.BUILD_NUMBER}"
+        echo "Status: ${currentResult}"
+      }
+      sh 'rm -f /tmp/deployment-*.yaml /tmp/decide_mode 2>/dev/null || true'
+    }
+    success { echo "Pipeline completed successfully." }
+    failure { echo "Pipeline failed — inspect logs for details." }
+  }
+}
