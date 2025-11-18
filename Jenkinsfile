@@ -208,7 +208,7 @@ PY
           export KUBECONFIG="$KUBECONFIG"
           KUBECTL="$WORKSPACE_BIN/kubectl"
 
-          ${KUBECTL} create namespace java-app --dry-run=client -o yaml | ${KUBECTL} apply -f -
+          ${KUBECTL} create namespace java-app --dry-run=client -o yaml | ${KUBECTL} apply -f - --validate=false
           ${KUBECTL} apply -f k8s-Usecase/configmap.yaml -n java-app --validate=false || true
           ${KUBECTL} apply -f k8s-Usecase/service.yaml -n java-app --validate=false || true
           ${KUBECTL} apply -f k8s-Usecase/ingress.yaml -n java-app --validate=false || true
