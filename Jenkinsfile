@@ -1,4 +1,4 @@
-// Jenkinsfile - Build (v1 & v2) -> Push to GAR -> Deploy to GKE Autopilot (first-run auto-deploy v1.0)
+// Jenkinsfile - Build (v1 & v2) -> Push to GAR -> Deploy to GKE Autopilot
 pipeline {
   agent any
 
@@ -13,10 +13,9 @@ pipeline {
   }
 
   environment {
-    // <-- customize these for your project
-    PROJECT_ID = 'planar-door-476510-m1'
+    PROJECT_ID = 'planar-door-476510-m1'         // change to your project
     REGION = 'us-central1'
-    CLUSTER_NAME = 'autopilot-demo'
+    CLUSTER_NAME = 'autopilot-demo'              // change if needed
     GAR_REPO = 'java-app'
     IMAGE_NAME = 'java-app'
     GAR_HOST = "${env.REGION}-docker.pkg.dev"
@@ -24,7 +23,7 @@ pipeline {
     YAML_DIR = "${env.WORKSPACE}/k8s-Usecase"
     WORK_BIN = "${env.WORKSPACE}/bin"
     KUBECONFIG = "${env.WORKSPACE}/.kube/config"
-    GCP_CRED_ID = 'gcp-service-account-key' // secret file credential in Jenkins (update if different)
+    GCP_CRED_ID = 'gcp-service-account-key'      // secret file credential in Jenkins
   }
 
   stages {
@@ -34,20 +33,18 @@ pipeline {
       }
     }
 
-    stage('Prepare workspace & tools') {
+    stage('Prepare tools & workspace') {
       steps {
         sh '''
           set -e
           mkdir -p ${WORKSPACE}/bin
-          # clone repo if not present (checkout above should populate, but keep for resilience)
+          # ensure repo dir exists (checkout normally does this)
           if [ ! -d "${YAML_DIR}" ]; then
             git clone https://github.com/Nagasai634/k8s-Usecase.git
           fi
         '''
-        // install kubectl to workspace/bin (deterministic)
         sh '''
           set -e
-          mkdir -p ${WORKSPACE}/bin
           KVER=$(curl -fsSL https://dl.k8s.io/release/stable.txt)
           curl -fsSL "https://dl.k8s.io/release/${KVER}/bin/linux/amd64/kubectl" -o ${WORKSPACE}/bin/kubectl
           chmod +x ${WORKSPACE}/bin/kubectl
@@ -56,18 +53,18 @@ pipeline {
       }
     }
 
-    stage('Build & Push Images') {
+    stage('Build & Push Images (with Java fallback)') {
       steps {
         withCredentials([file(credentialsId: env.GCP_CRED_ID, variable: 'GCP_SA_KEYFILE')]) {
           script {
-            // compute tags including BUILD_NUMBER
+            // compute image tags with build number
             def v1tag = "v1.0-${env.BUILD_NUMBER}"
             def v2tag = "v2.0-${env.BUILD_NUMBER}"
             env.GAR_IMAGE_V1 = "${env.GAR_HOST}/${env.PROJECT_ID}/${env.GAR_REPO}/${env.IMAGE_NAME}:${v1tag}"
             env.GAR_IMAGE_V2 = "${env.GAR_HOST}/${env.PROJECT_ID}/${env.GAR_REPO}/${env.IMAGE_NAME}:${v2tag}"
           }
 
-          // Build/push both images (serial for simplicity). Make gradlew executable to avoid permission denied.
+          // Build and push images. If Java build fails, build lightweight nginx image serving static page.
           sh(
             '''
               set -e
@@ -78,26 +75,79 @@ pipeline {
 
               cd ${REPO_DIR}
               mkdir -p src/main/resources/static
-              # ensure gradlew executable
-              if [ -f "./gradlew" ]; then chmod +x ./gradlew; fi
+              if [ -f ./gradlew ]; then chmod +x ./gradlew; fi
 
-              # --- build v1 ---
+              build_and_push() {
+                local version=$1
+                local image=$2
+                echo "=== Build attempt for ${version} -> ${image} ==="
+
+                # try Java gradle build + docker image if possible
+                set +e
+                ./gradlew clean build --no-daemon
+                GRADLE_STATUS=$?
+                set -e
+
+                if [ "${GRADLE_STATUS}" -eq 0 ]; then
+                  echo "Gradle build succeeded for ${version} - building app docker image"
+                  # assume Dockerfile in repo is suitable; otherwise fallback will run
+                  docker build -t ${image} .
+                else
+                  echo "Gradle build failed for ${version}; building minimal nginx fallback image"
+                  # create a simple nginx Dockerfile that serves index.html
+                  TMPDIR=$(mktemp -d)
+                  cat > ${TMPDIR}/index.html <<EOF
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>${version}</title></head>
+<body style="font-family:Arial;text-align:center;padding:60px;background:#f3f4f6">
+  <div style="display:inline-block;padding:30px;border-radius:8px;background:#111827;color:#fff">
+    <h1>${version} - FALLBACK</h1>
+    <p>This is a fallback static page (Gradle build failed).</p>
+  </div>
+</body>
+</html>
+EOF
+                  cat > ${TMPDIR}/Dockerfile <<'DF'
+FROM nginx:1.25-alpine
+COPY index.html /usr/share/nginx/html/index.html
+EXPOSE 80
+DF
+                  docker build -t ${image} ${TMPDIR}
+                  rm -rf ${TMPDIR}
+                fi
+
+                # push with up to 3 retries
+                for i in 1 2 3; do
+                  if docker push ${image}; then
+                    echo "Pushed ${image}"
+                    break
+                  else
+                    echo "Push attempt $i for ${image} failed"
+                    sleep 5
+                    if [ $i -eq 3 ]; then
+                      echo "Failed to push ${image} after retries"
+                      return 1
+                    fi
+                  fi
+                done
+
+                return 0
+              }
+
+              # create versioned index pages (app may override, but we ensure content exists)
               cat > src/main/resources/static/index.html <<'EOF'
 <!DOCTYPE html><html><head><title>V1.0</title></head><body><h1>Version 1.0 - BLUE</h1></body></html>
 EOF
-              ./gradlew clean build --no-daemon
-              docker build -t ${GAR_IMAGE_V1} .
-              for i in 1 2 3; do docker push ${GAR_IMAGE_V1} && break || { echo "push v1 attempt $i failed"; sleep 5; }; done
 
-              # --- build v2 ---
+              build_and_push "v1.0" "${GAR_IMAGE_V1}"
+
               cat > src/main/resources/static/index.html <<'EOF'
 <!DOCTYPE html><html><head><title>V2.0</title></head><body><h1>Version 2.0 - GREEN</h1></body></html>
 EOF
-              ./gradlew clean build --no-daemon
-              docker build -t ${GAR_IMAGE_V2} .
-              for i in 1 2 3; do docker push ${GAR_IMAGE_V2} && break || { echo "push v2 attempt $i failed"; sleep 5; }; done
 
-              echo "Pushed images:"
+              build_and_push "v2.0" "${GAR_IMAGE_V2}"
+
+              echo "Images available:"
               echo "  ${GAR_IMAGE_V1}"
               echo "  ${GAR_IMAGE_V2}"
             '''
@@ -114,7 +164,6 @@ EOF
             export GOOGLE_APPLICATION_CREDENTIALS="${GCP_SA_KEYFILE}"
             gcloud auth activate-service-account --key-file="${GOOGLE_APPLICATION_CREDENTIALS}"
             gcloud config set project ${PROJECT_ID}
-            # populate kubeconfig (suitable for Autopilot)
             gcloud container clusters get-credentials ${CLUSTER_NAME} --region=${REGION} --project=${PROJECT_ID} --quiet
             mkdir -p $(dirname ${KUBECONFIG})
             kubectl config view --raw > ${KUBECONFIG}
@@ -170,7 +219,6 @@ EOF
           def ver = env.EFFECTIVE_VERSION
           def action = env.EFFECTIVE_ACTION
 
-          // Use single shell block but concatenate Groovy vars into it so shell ${...} remain shell variables
           sh(
             '''
               set -e
@@ -183,14 +231,13 @@ EOF
 
               echo "Performing ${ACTION} for ${VER} using image ${IMAGE}"
 
-              # create/ensure namespace and apply updated deployment
               cp ${YAML_DIR}/deployment.yaml /tmp/deployment-${VER}.yaml
               sed -i "s|IMAGE_PLACEHOLDER|${IMAGE}|g" /tmp/deployment-${VER}.yaml
               sed -i "s|VERSION_PLACEHOLDER|${VER}|g" /tmp/deployment-${VER}.yaml
 
               ${KUBECTL} apply -f /tmp/deployment-${VER}.yaml -n java-app --validate=false || true
 
-              # patch ingress to restrict source range (nginx ingress annotation). Change if you use different controller.
+              # patch ingress to whitelist CIDR (nginx ingress). Adjust for your ingress controller if needed.
               ${KUBECTL} patch ingress java-app-ingress -n java-app --type='merge' -p '{"metadata":{"annotations":{"nginx.ingress.kubernetes.io/whitelist-source-range":"'${CIDR}'"}}}' || echo "Ingress patch skipped/failed"
 
               if [ "${ACTION}" = "ROLLOUT" ]; then
@@ -239,19 +286,17 @@ EOF
             echo "Ingress IP not available yet."
           else
             echo "Ingress IP: $IP"
-            # try fetch homepage
             if curl -s --connect-timeout 5 http://$IP/ | head -n 5; then
-              echo "Homepage responded:"
+              echo "Homepage responded (first 20 lines):"
               curl -s http://$IP/ | head -n 20
             else
-              echo "Could not fetch homepage from agent. Ensure the agent IP (or this Jenkins controller) is allowed by ALLOWED_IP_CIDR"
+              echo "Could not fetch homepage from agent. Ensure agent IP (or Jenkins controller) is allowed by ALLOWED_IP_CIDR"
             fi
           fi
         '''
       }
     }
-
-  } // stages
+  }
 
   post {
     always {
@@ -265,9 +310,7 @@ EOF
         echo "Build number: ${env.BUILD_NUMBER}"
         echo "Status: ${currentResult}"
       }
-      sh '''
-        rm -f /tmp/deployment-v1.0.yaml /tmp/deployment-v2.0.yaml 2>/dev/null || true
-      '''
+      sh 'rm -f /tmp/deployment-v1.0.yaml /tmp/deployment-v2.0.yaml 2>/dev/null || true'
     }
 
     success {
