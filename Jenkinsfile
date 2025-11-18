@@ -92,6 +92,11 @@ pipeline {
               echo "Could not find java-gradle directory at k8s-Usecase/java-gradle or java-gradle. Trying workspace root."
             fi
 
+            # ensure gradlew executable to avoid "Permission denied"
+            if [ -f "./gradlew" ]; then
+              chmod +x ./gradlew || true
+            fi
+
             mkdir -p src/main/resources/static
 
             # --- v1
@@ -114,80 +119,75 @@ EOF
       }
     }
 
-    stage('Authenticate to GKE (robust copy + token injection)') {
+    stage('Authenticate to GKE (set KUBECONFIG before get-credentials)') {
       steps {
         withCredentials([file(credentialsId: 'gcp-service-account-key', variable: 'GCP_SA_KEYFILE')]) {
           sh '''
             set -e
             export GOOGLE_APPLICATION_CREDENTIALS="${GCP_SA_KEYFILE}"
-            # Ensure WORKSPACE kubeconfig dir exists
             mkdir -p "$(dirname ${KUBECONFIG})"
+            # Ensure KUBECONFIG points to workspace file BEFORE gcloud writes credentials
+            export KUBECONFIG="${KUBECONFIG}"
 
-            # Activate SA and set project (must succeed)
+            # Activate SA and set project
             gcloud auth activate-service-account --key-file="${GOOGLE_APPLICATION_CREDENTIALS}"
             gcloud config set project ${PROJECT_ID}
 
-            # Ask gcloud to write cluster credentials (this writes to the default user kubeconfig, usually $HOME/.kube/config)
+            # Ask gcloud to write credentials directly into our KUBECONFIG (workspace)
             if gcloud container clusters get-credentials ${CLUSTER_NAME} --region=${REGION} --project=${PROJECT_ID} --quiet; then
-              echo "gcloud wrote kubeconfig to default location."
+              echo "gcloud wrote kubeconfig to ${KUBECONFIG}"
             else
-              echo "gcloud get-credentials failed; will mark SKIP_K8S and continue."
+              echo "gcloud get-credentials failed; will mark SKIP_K8S and continue"
               echo "SKIP_K8S=true" > /tmp/jenkins_skip_k8s
             fi
 
-            # If gcloud wrote a kubeconfig in HOME, copy it to workspace kubeconfig so we can modify it reliably
-            if [ -f "${HOME}/.kube/config" ]; then
-              cp "${HOME}/.kube/config" "${KUBECONFIG}" || true
-              echo "Copied ${HOME}/.kube/config -> ${KUBECONFIG}"
-            else
-              # fallback: dump current in-memory kubectl config into workspace file
-              "${WORKSPACE_BIN}/kubectl" config view --raw > "${KUBECONFIG}" || true
-              echo "Exported current kubectl config to ${KUBECONFIG}"
+            # Double-check we have a kubeconfig file and contexts
+            if [ -f "${KUBECONFIG}" ]; then
+              echo "Kubeconfig contents (minified):"
+              ${WORKSPACE_BIN}/kubectl --kubeconfig=${KUBECONFIG} config view --minify -o yaml || true
             fi
 
-            # If SKIP not set, ensure current-context exists and inject token
+            # If SKIP not set, ensure current-context exists (prefer expected gcloud context),
+            # then inject token into kubeconfig user and bind the context to that user.
             if [ ! -f /tmp/jenkins_skip_k8s ]; then
-              export KUBECONFIG="${KUBECONFIG}"
               KUBECTL="${WORKSPACE_BIN}/kubectl"
-
-              # Expected context name from gcloud:
               EXPECTED_CTX="gke_${PROJECT_ID}_${REGION}_${CLUSTER_NAME}"
 
-              # If expected context exists, use it. Otherwise pick the first available.
-              if ${KUBECTL} config get-contexts -o name 2>/dev/null | grep -q "^${EXPECTED_CTX}$"; then
-                ${KUBECTL} config use-context "${EXPECTED_CTX}" || true
+              # If expected context exists, use it
+              if ${KUBECTL} --kubeconfig=${KUBECONFIG} config get-contexts -o name 2>/dev/null | grep -q "^${EXPECTED_CTX}$"; then
+                ${KUBECTL} --kubeconfig=${KUBECONFIG} config use-context "${EXPECTED_CTX}" || true
                 echo "Using expected context: ${EXPECTED_CTX}"
               else
-                FIRST_CTX=$(${KUBECTL} config get-contexts -o name 2>/dev/null | head -n1 || echo "")
+                # otherwise use first context present
+                FIRST_CTX=$(${KUBECTL} --kubeconfig=${KUBECONFIG} config get-contexts -o name 2>/dev/null | head -n1 || echo "")
                 if [ -n "$FIRST_CTX" ]; then
-                  ${KUBECTL} config use-context "$FIRST_CTX" || true
-                  echo "Expected context not found; using first available context: $FIRST_CTX"
+                  ${KUBECTL} --kubeconfig=${KUBECONFIG} config use-context "$FIRST_CTX" || true
+                  echo "Using first available context: $FIRST_CTX"
                 else
-                  echo "No contexts present in kubeconfig; cannot inject token. Marking SKIP_K8S."
+                  echo "No contexts present in kubeconfig; marking SKIP_K8S."
                   echo "SKIP_K8S=true" > /tmp/jenkins_skip_k8s
                 fi
               fi
 
-              # If we have a current context now, inject token and bind user
-              if [ -z "$( ${WORKSPACE_BIN}/kubectl --kubeconfig=${KUBECONFIG} config current-context 2>/dev/null || echo "" )" ]; then
-                echo "After context selection, current-context still empty - marking SKIP_K8S."
+              # Now inject token and set the context's user to it
+              if [ -z "$(${KUBECTL} --kubeconfig=${KUBECONFIG} config current-context 2>/dev/null || echo "")" ]; then
+                echo "current-context empty after selection; marking SKIP_K8S."
                 echo "SKIP_K8S=true" > /tmp/jenkins_skip_k8s
               else
-                # Print who we are (best-effort) and inject token
                 ACCESS_TOKEN=$(gcloud auth print-access-token || echo "")
-                if [ -z "$ACCESS_TOKEN" ]; then
-                  echo "Could not obtain gcloud access token; letting kubeconfig's auth-provider handle auth (may fail on CI agents)."
-                else
+                if [ -n "$ACCESS_TOKEN" ]; then
                   TOKEN_USER="jenkins-gcp-sa-token"
-                  ${WORKSPACE_BIN}/kubectl --kubeconfig=${KUBECONFIG} config set-credentials "${TOKEN_USER}" --token="$ACCESS_TOKEN" || true
-                  CUR_CTX=$(${WORKSPACE_BIN}/kubectl --kubeconfig=${KUBECONFIG} config current-context 2>/dev/null || echo "")
+                  ${KUBECTL} --kubeconfig=${KUBECONFIG} config set-credentials "${TOKEN_USER}" --token="$ACCESS_TOKEN" || true
+                  CUR_CTX=$(${KUBECTL} --kubeconfig=${KUBECONFIG} config current-context 2>/dev/null || echo "")
                   if [ -n "$CUR_CTX" ]; then
-                    ${WORKSPACE_BIN}/kubectl --kubeconfig=${KUBECONFIG} config set-context "$CUR_CTX" --user="${TOKEN_USER}" || true
-                    echo "Injected token and set context '$CUR_CTX' to use user ${TOKEN_USER}."
+                    ${KUBECTL} --kubeconfig=${KUBECONFIG} config set-context "$CUR_CTX" --user="${TOKEN_USER}" || true
+                    echo "Injected token and bound user ${TOKEN_USER} to context ${CUR_CTX}."
                   else
-                    echo "Token injected but no current context to bind to; marking SKIP_K8S."
+                    echo "Token available but no current context to bind to; marking SKIP_K8S."
                     echo "SKIP_K8S=true" > /tmp/jenkins_skip_k8s
                   fi
+                else
+                  echo "Could not get gcloud access token; will rely on auth-provider (may fail on CI)."
                 fi
               fi
             fi
