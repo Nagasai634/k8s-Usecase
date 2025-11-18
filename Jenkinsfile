@@ -19,14 +19,14 @@ pipeline {
   }
 
   environment {
-    # — Edit these to match your environment —
+    // Edit these to match your environment
     PROJECT_ID = 'planar-door-476510-m1'
     REGION = 'us-central1'
     CLUSTER_NAME = 'autopilot-demo'
     GAR_REPO = 'java-app'
     IMAGE_NAME = 'java-app'
 
-    # Derived
+    // Derived
     WORKSPACE_BIN = "${env.WORKSPACE}/bin"
     GAR_HOST = "${env.REGION}-docker.pkg.dev"
     V1_TAG = "v1.0-${env.BUILD_NUMBER}"
@@ -35,7 +35,7 @@ pipeline {
     GAR_IMAGE_V2 = "${env.GAR_HOST}/${env.PROJECT_ID}/${env.GAR_REPO}/${env.IMAGE_NAME}:${env.V2_TAG}"
     KUBECONFIG = "${env.WORKSPACE}/.kube/config"
 
-    # Safe-mode defaults
+    // Safe-mode defaults
     DEFAULT_DESIRED_REPLICAS = "3"
     SAFE_REPLICAS = "1"
     SAFE_REQUEST_CPU = "100m"
