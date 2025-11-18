@@ -3,11 +3,16 @@ kind: Service
 metadata:
   name: java-gradle-service
   namespace: java-app
+  labels:
+    app: java-gradle-app
+  annotations:
+    # Enable NEG on GKE so GCP HTTP(S) LB can attach backends (if using GCE Ingress)
+    cloud.google.com/neg: '{"exposed_ports":{"80":{}}}'
 spec:
   selector:
     app: java-gradle-app
   ports:
-  - port: 80
-    targetPort: 8080
-    protocol: TCP
+    - name: http
+      port: 80
+      targetPort: 8080
   type: ClusterIP
