@@ -3,14 +3,13 @@ pipeline {
   agent any
 
   options {
-    ansiColor('xterm')
     timestamps()
   }
 
   parameters {
     choice(name: 'DEPLOYMENT_ACTION', choices: ['ROLLOUT', 'ROLLBACK'], description: 'Choose deployment action (ignored on first run)')
     choice(name: 'VERSION', choices: ['v1.0', 'v2.0'], description: 'Choose version to deploy (ignored on first run)')
-    string(name: 'ALLOWED_IP_CIDR', defaultValue: '203.0.113.5/32', description: 'CIDR to whitelist ingress (example: 203.0.113.5/32)')
+    string(name: 'ALLOWED_IP_CIDR', defaultValue: '136.119.42.77/32', description: 'CIDR to whitelist ingress (example: 203.0.113.5/32)')
   }
 
   environment {
