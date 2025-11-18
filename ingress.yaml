@@ -4,15 +4,20 @@ metadata:
   name: java-app-ingress
   namespace: java-app
   annotations:
+    # If using GCE Ingress (GKE): use the "gce" ingress class. If using nginx ingress controller,
+    # the nginx annotations below will be respected instead — the pipeline patches the nginx whitelist.
     kubernetes.io/ingress.class: "gce"
+    # Keep nginx whitelist annotation here — pipeline attempts to patch it; harmless if not using nginx.
+    nginx.ingress.kubernetes.io/whitelist-source-range: "0.0.0.0/0"
 spec:
   rules:
-  - http:
-      paths:
-      - path: /*
-        pathType: ImplementationSpecific
-        backend:
-          service:
-            name: java-gradle-service
-            port:
-              number: 80
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: java-gradle-service
+                port:
+                  number: 80
+  # Optional: create a default backend for health checks (left empty so LB will use service)
