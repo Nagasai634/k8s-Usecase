@@ -63,7 +63,7 @@ pipeline {
               ./gradlew clean build --no-daemon
               docker build -t ${GAR_IMAGE_V1} .
               docker push ${GAR_IMAGE_V1}
-              echo "✅ v1.0 build and push completed"
+              echo "v1.0 build and push completed"
             '''
           }
         }
@@ -75,7 +75,7 @@ pipeline {
               ./gradlew clean build --no-daemon
               docker build -t ${GAR_IMAGE_V2} .
               docker push ${GAR_IMAGE_V2}
-              echo "✅ v2.0 build and push completed"
+              echo "v2.0 build and push completed"
             '''
           }
         }
