@@ -34,7 +34,7 @@ pipeline {
         cleanWs()
         sh '''
           # Repo is already checked out via SCM; no need to clone again
-          cd k8s-Usecase/java-gradle
+          cd /var/lib/jenkins/workspace/java-gradle-multi_feature/k8s-Usecase/java-gradle
           # Remove problematic files if they exist
           rm -f src/main/java/com/example/demo/VersionController.java 2>/dev/null || true
           chmod +x ./gradlew
@@ -59,7 +59,7 @@ pipeline {
         stage('Build v1.0') {
           steps {
             sh '''
-              cd k8s-Usecase/java-gradle
+              cd /var/lib/jenkins/workspace/java-gradle-multi_feature/k8s-Usecase/java-gradle
               echo "Building v1.0 using existing Dockerfile and static files..."
               ./gradlew clean build --no-daemon
               docker build -t ${GAR_IMAGE_V1} .
@@ -71,7 +71,7 @@ pipeline {
         stage('Build v2.0') {
           steps {
             sh '''
-              cd k8s-Usecase/java-gradle
+              cd /var/lib/jenkins/workspace/java-gradle-multi_feature/k8s-Usecase/java-gradle
               echo "Building v2.0 using existing Dockerfile and static files..."
               ./gradlew clean build --no-daemon
               docker build -t ${GAR_IMAGE_V2} .
