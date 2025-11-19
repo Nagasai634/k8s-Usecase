@@ -5,14 +5,11 @@ metadata:
   namespace: java-app
   annotations:
     kubernetes.io/ingress.class: "gce"
+    networking.gke.io/managed-certificates: java-app-certificate
+    kubernetes.io/ingress.global-static-ip-name: "java-app-static-ip"
 spec:
-  rules:
-  - http:
-      paths:
-      - path: /*
-        pathType: ImplementationSpecific
-        backend:
-          service:
-            name: java-gradle-service
-            port:
-              number: 80
+  defaultBackend:
+    service:
+      name: java-gradle-service
+      port:
+        number: 80
