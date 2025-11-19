@@ -55,7 +55,7 @@ pipeline {
 
     stage('Build Versions') {
       parallel {
-        stage('Build v1.0') {
+        stage('Build v2.0') {
           steps {
             sh '''
               cd java-gradle
@@ -67,7 +67,7 @@ pipeline {
             '''
           }
         }
-        stage('Build v2.0') {
+        stage('Build v1.0') {
           steps {
             sh '''
               cd java-gradle
