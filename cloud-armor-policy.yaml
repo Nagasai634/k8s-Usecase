@@ -2,18 +2,20 @@ apiVersion: networking.gke.io/v1beta1
 kind: SecurityPolicy
 metadata:
   name: java-app-security-policy
+  namespace: java-app  # Ensure this matches your namespace
 spec:
   description: "Restrict access to specific IP addresses"
   defaultRule:
-    action: "deny(403)"
+    action: "deny(403)"  # Denies all by default
   rules:
   - action: "allow"
-    priority: 1000
+    priority: 1000  # Lower number = higher priority
     match:
       versionedExpr: "SRC_IPS_V1"
       config:
         srcIpRanges:
-        - "34.46.245.248"  # Your current IP
+        - "34.46.245.248"  # e.g., "203.0.113.1" – Replace with your actual public IP (from browser or Jenkins)
         - "136.110.196.142"
-        - "0.0.0.0/0"         # Temporary - remove after testing
+        # - "ANOTHER_IP_HERE"  # Add more IPs if needed, e.g., team members' IPs
+        # Remove "0.0.0.0/0" after testing to secure it
     description: "Allow specific IP addresses"

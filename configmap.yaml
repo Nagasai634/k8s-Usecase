@@ -4,5 +4,4 @@ metadata:
   name: app-config
   namespace: java-app
 data:
-  app.version: "2.0"
-  app.message: "Hello from ConfigMap"
+  APP_ENV: "production"
