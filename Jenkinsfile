@@ -53,35 +53,28 @@ pipeline {
       }
     }
 
-    stage('Build Versions') {
-      parallel {
-        stage('Build v1.0') {
-          steps {
-            sh '''
-              cd java-gradle
-              echo "Building v1.0 using existing Dockerfile and static files..."
-              mkdir -p src/main/resources/static
+    stage('Build Version') {
+      steps {
+        script {
+          def version = params.VERSION ?: 'v1.0'
+          def imageTag = (version == 'v1.0') ? env.GAR_IMAGE_V1 : env.GAR_IMAGE_V2
+          
+          sh """
+            cd java-gradle
+            echo "Building ${version} using existing Dockerfile and static files..."
+            mkdir -p src/main/resources/static
+            
+            if [ "${version}" = "v1.0" ]; then
               echo '<!DOCTYPE html><html><head><title>V1.0</title><style>body{background:#1e3a8a;color:white;text-align:center;padding:50px}.container{background:rgba(255,255,255,0.1);padding:30px;border-radius:10px;margin:auto;max-width:600px}h1{color:#60a5fa}.feature{background:#3b82f6;padding:10px;margin:10px;border-radius:5px}</style></head><body><div class="container"><h1>🚀 Version 1.0 - BLUE</h1><p>Simple Java Application</p></div></body></html>' > src/main/resources/static/index.html
-              ./gradlew clean build --no-daemon
-              docker build -t ${GAR_IMAGE_V1} .
-              docker push ${GAR_IMAGE_V1}
-              echo "✅ v1.0 build and push completed"
-            '''
-          }
-        }
-        stage('Build v2.0') {
-          steps {
-            sh '''
-              cd java-gradle
-              echo "Building v2.0 using existing Dockerfile and static files..."
-              mkdir -p src/main/resources/static
+            else
               echo '<!DOCTYPE html><html><head><title>V2.0</title><style>body{background:#065f46;color:white;text-align:center;padding:50px}.container{background:rgba(255,255,255,0.1);padding:30px;border-radius:10px;margin:auto;max-width:600px}h1{color:#34d399}.feature{background:#10b981;padding:10px;margin:10px;border-radius:5px}</style></head><body><div class="container"><h1>🎯 Version 2.0 - GREEN</h1><p>Enhanced Java Application</p></div></body></html>' > src/main/resources/static/index.html
-              ./gradlew clean build --no-daemon
-              docker build -t ${GAR_IMAGE_V2} .
-              docker push ${GAR_IMAGE_V2}
-              echo "✅ v2.0 build and push completed"
-            '''
-          }
+            fi
+            
+            ./gradlew clean build --no-daemon
+            docker build -t ${imageTag} .
+            docker push ${imageTag}
+            echo "✅ ${version} build and push completed"
+          """
         }
       }
     }
