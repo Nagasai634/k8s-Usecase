@@ -1,6 +1,6 @@
 pipeline {
   agent any
-
+  
   parameters {
     choice(
       name: 'DEPLOYMENT_ACTION',
@@ -25,20 +25,11 @@ pipeline {
     GAR_IMAGE_V1 = "${env.GAR_HOST}/${env.PROJECT_ID}/${env.GAR_REPO}/${env.IMAGE_NAME}:${env.V1_TAG}"
     GAR_IMAGE_V2 = "${env.GAR_HOST}/${env.PROJECT_ID}/${env.GAR_REPO}/${env.IMAGE_NAME}:${env.V2_TAG}"
     CLUSTER_NAME = "autopilot-demo"
-    REGION_FLAG = "us-central1"
     KUBECONFIG = "${env.WORKSPACE}/.kube/config"
-    PATH = "${env.WORKSPACE}/bin:${env.PATH}"
-  }
-
-  options {
-    timestamps()
-    buildDiscarder(logRotator(numToKeepStr: '30'))
-    timeout(time: 60, unit: 'MINUTES')
   }
 
   stages {
-
-    stage('Clean workspace') {
+    stage('Clean Project') {
       steps {
         sh '''
           # Repo is already checked out via SCM; no need to clean or clone
@@ -50,24 +41,14 @@ pipeline {
       }
     }
 
-    stage('Checkout') {
-      steps {
-        checkout scm
-      }
-    }
-
-    stage('Install kubectl') {
+    stage('Setup Tools') {
       steps {
         sh '''
-          set -e
-          # download kubectl stable
-          KUBECTL_BIN=${WORKSPACE}/bin/kubectl
-          if [ ! -f "${KUBECTL_BIN}" ]; then
-            curl -L -o /tmp/kubectl "https://dl.k8s.io/release/$(curl -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-            chmod +x /tmp/kubectl
-            mv /tmp/kubectl ${KUBECTL_BIN}
-          fi
-          ${KUBECTL_BIN} version --client=true || true
+          mkdir -p ${WORKSPACE}/bin
+          curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          chmod +x ./kubectl
+          mv ./kubectl ${WORKSPACE}/bin/
+          export PATH="${WORKSPACE}/bin:${PATH}"
         '''
       }
     }
@@ -82,11 +63,10 @@ pipeline {
               ./gradlew clean build --no-daemon
               docker build -t ${GAR_IMAGE_V1} .
               docker push ${GAR_IMAGE_V1}
-              echo "✅ v1.0 build and push completed"
+              echo "v1.0 build and push completed"
             '''
           }
         }
-
         stage('Build v2.0') {
           steps {
             sh '''
@@ -95,14 +75,14 @@ pipeline {
               ./gradlew clean build --no-daemon
               docker build -t ${GAR_IMAGE_V2} .
               docker push ${GAR_IMAGE_V2}
-              echo "✅ v2.0 build and push completed"
+              echo "v2.0 build and push completed"
             '''
           }
         }
       }
     }
 
-    stage('Prepare GKE credentials') {
+    stage('Setup GKE Access') {
       steps {
         withCredentials([file(credentialsId: 'gcp-service-account-key', variable: 'GCP_SA_KEYFILE')]) {
           sh '''
@@ -150,7 +130,7 @@ EOF
     stage('Deploy Infrastructure') {
       steps {
         sh '''
-          set -e
+          export PATH="${WORKSPACE}/bin:${PATH}"
           export KUBECONFIG=${KUBECONFIG}
           
           echo "Creating namespace and deploying infrastructure..."
@@ -166,7 +146,7 @@ EOF
       }
     }
 
-    stage('Deploy to GKE') {
+    stage('Execute User Requested Action') {
       steps {
         script {
           def action = params.DEPLOYMENT_ACTION ?: 'ROLLOUT'
@@ -178,7 +158,7 @@ EOF
           def imageTag = (version == 'v1.0') ? env.GAR_IMAGE_V1 : env.GAR_IMAGE_V2
           
           sh """
-            set -e
+            export PATH="${WORKSPACE}/bin:${PATH}"
             export KUBECONFIG=${KUBECONFIG}
             
             if [ "${action}" = "ROLLOUT" ]; then
@@ -228,10 +208,10 @@ EOF
       }
     }
 
-    stage('Verify public access') {
+    stage('Verify Deployment') {
       steps {
         sh '''
-          set -e
+          export PATH="${WORKSPACE}/bin:${PATH}"
           export KUBECONFIG=${KUBECONFIG}
           
           echo "=== DEPLOYMENT VERIFICATION ==="
@@ -255,22 +235,31 @@ EOF
           
           if [ "$IP" != "Pending" ] && [ ! -z "$IP" ]; then
             echo "Testing application endpoint..."
-            for i in {1..5}; do  # Reduced attempts
-              if curl -s --connect-timeout 5 http://$IP > /dev/null; then
-                echo "Application is responding"
-                echo "Application content:"
-                curl -s http://$IP | grep -o "Version [0-9]\\.[0-9] - [A-Z]*" | head -1 || echo "Content check failed"
-                break
-              else
-                echo "Waiting for application to be ready... (attempt $i/5)"
-                sleep 10
-              fi
-            done
+            RESPONSE=$(curl -v --connect-timeout 5 --max-time 10 http://$IP 2>&1)
+            if echo "$RESPONSE" | grep -q "200 OK"; then
+              echo "Application is responding"
+              echo "Application content:"
+              echo "$RESPONSE" | grep -o "Version [0-9]\\.[0-9] - [A-Z]*" | head -1 || echo "Content check failed"
+            else
+              echo "ERROR: Application not responding. Debugging info:"
+              echo "Curl response: $RESPONSE"
+              echo "=== Pod Readiness ==="
+              kubectl get pods -l app=java-gradle-app -n java-app -o jsonpath='{.items[*].status.conditions[?(@.type=="Ready")].status}'
+              echo "=== Service Endpoints ==="
+              kubectl get endpoints java-gradle-service -n java-app
+              echo "=== Pod Logs (last 20 lines) ==="
+              for POD in $(kubectl get pods -l app=java-gradle-app -n java-app -o name); do
+                echo "--- Logs for $POD ---"
+                kubectl logs $POD -n java-app --tail=20 || echo "No logs available"
+              done
+              echo "=== Events ==="
+              kubectl get events -n java-app --sort-by=.lastTimestamp | tail -10
+              exit 1  # Fail the pipeline if app doesn't respond
+            fi
           else
             echo "IP address not yet available. Ingress may still be provisioning."
+            exit 1
           fi
-
-          echo "SUCCESS: Application reachable at http://$IP/"
         '''
       }
     }
@@ -289,21 +278,16 @@ EOF
         """
         
         sh '''
-          echo "=== POST-CHECKS ==="
-          export KUBECONFIG=${KUBECONFIG}
-          kubectl get pods,svc,ing -n java-app || true
-          echo "--- End of pipeline run ---"
+          rm -f /tmp/deployment-v1.0.yaml /tmp/deployment-v2.0.yaml 2>/dev/null || true
         '''
       }
     }
-
     success {
       script {
         echo "Pipeline executed successfully!"
         echo "Deployment action '${params.DEPLOYMENT_ACTION ?: 'ROLLOUT'}' for version '${params.VERSION ?: 'v1.0'}' completed."
       }
     }
-
     failure {
       script {
         echo "Pipeline failed during '${params.DEPLOYMENT_ACTION ?: 'ROLLOUT'}' for version '${params.VERSION ?: 'v1.0'}'"
