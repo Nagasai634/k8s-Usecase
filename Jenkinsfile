@@ -32,7 +32,17 @@ pipeline {
     stage('Clean Project') {
       steps {
         sh '''
-          # Repo is already checked out via SCM; no need to clean or clone
+          # Debug: Check workspace contents after SCM checkout
+          echo "Current directory: $(pwd)"
+          echo "Workspace contents:"
+          ls -la
+          
+          # Check if required directory exists
+          if [ ! -d "k8s-Usecase/java-gradle" ]; then
+            echo "ERROR: Directory 'k8s-Usecase/java-gradle' not found in workspace. Check repo structure on branch 'feature'."
+            exit 1
+          fi
+          
           cd k8s-Usecase/java-gradle
           # Remove problematic files if they exist
           rm -f src/main/java/com/example/demo/VersionController.java 2>/dev/null || true
