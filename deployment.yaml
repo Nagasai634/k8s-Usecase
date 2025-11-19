@@ -5,7 +5,6 @@ metadata:
   namespace: java-app
   labels:
     app: java-gradle-app
-    version: VERSION_PLACEHOLDER
 spec:
   replicas: 2
   selector:
@@ -15,7 +14,6 @@ spec:
     metadata:
       labels:
         app: java-gradle-app
-        version: VERSION_PLACEHOLDER
     spec:
       containers:
       - name: java-app

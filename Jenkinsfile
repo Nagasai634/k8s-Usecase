@@ -1,6 +1,6 @@
 pipeline {
   agent any
-  
+
   parameters {
     choice(
       name: 'DEPLOYMENT_ACTION',
@@ -25,11 +25,20 @@ pipeline {
     GAR_IMAGE_V1 = "${env.GAR_HOST}/${env.PROJECT_ID}/${env.GAR_REPO}/${env.IMAGE_NAME}:${env.V1_TAG}"
     GAR_IMAGE_V2 = "${env.GAR_HOST}/${env.PROJECT_ID}/${env.GAR_REPO}/${env.IMAGE_NAME}:${env.V2_TAG}"
     CLUSTER_NAME = "autopilot-demo"
+    REGION_FLAG = "us-central1"
     KUBECONFIG = "${env.WORKSPACE}/.kube/config"
+    PATH = "${env.WORKSPACE}/bin:${env.PATH}"
+  }
+
+  options {
+    timestamps()
+    buildDiscarder(logRotator(numToKeepStr: '30'))
+    timeout(time: 60, unit: 'MINUTES')
   }
 
   stages {
-    stage('Clean Project') {
+
+    stage('Clean workspace') {
       steps {
         sh '''
           # Repo is already checked out via SCM; no need to clean or clone
@@ -41,14 +50,24 @@ pipeline {
       }
     }
 
-    stage('Setup Tools') {
+    stage('Checkout') {
+      steps {
+        checkout scm
+      }
+    }
+
+    stage('Install kubectl') {
       steps {
         sh '''
-          mkdir -p ${WORKSPACE}/bin
-          curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-          chmod +x ./kubectl
-          mv ./kubectl ${WORKSPACE}/bin/
-          export PATH="${WORKSPACE}/bin:${PATH}"
+          set -e
+          # download kubectl stable
+          KUBECTL_BIN=${WORKSPACE}/bin/kubectl
+          if [ ! -f "${KUBECTL_BIN}" ]; then
+            curl -L -o /tmp/kubectl "https://dl.k8s.io/release/$(curl -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+            chmod +x /tmp/kubectl
+            mv /tmp/kubectl ${KUBECTL_BIN}
+          fi
+          ${KUBECTL_BIN} version --client=true || true
         '''
       }
     }
@@ -67,6 +86,7 @@ pipeline {
             '''
           }
         }
+
         stage('Build v2.0') {
           steps {
             sh '''
@@ -82,7 +102,7 @@ pipeline {
       }
     }
 
-    stage('Setup GKE Access') {
+    stage('Prepare GKE credentials') {
       steps {
         withCredentials([file(credentialsId: 'gcp-service-account-key', variable: 'GCP_SA_KEYFILE')]) {
           sh '''
@@ -130,7 +150,7 @@ EOF
     stage('Deploy Infrastructure') {
       steps {
         sh '''
-          export PATH="${WORKSPACE}/bin:${PATH}"
+          set -e
           export KUBECONFIG=${KUBECONFIG}
           
           echo "Creating namespace and deploying infrastructure..."
@@ -146,7 +166,7 @@ EOF
       }
     }
 
-    stage('Execute User Requested Action') {
+    stage('Deploy to GKE') {
       steps {
         script {
           def action = params.DEPLOYMENT_ACTION ?: 'ROLLOUT'
@@ -158,7 +178,7 @@ EOF
           def imageTag = (version == 'v1.0') ? env.GAR_IMAGE_V1 : env.GAR_IMAGE_V2
           
           sh """
-            export PATH="${WORKSPACE}/bin:${PATH}"
+            set -e
             export KUBECONFIG=${KUBECONFIG}
             
             if [ "${action}" = "ROLLOUT" ]; then
@@ -208,10 +228,10 @@ EOF
       }
     }
 
-    stage('Verify Deployment') {
+    stage('Verify public access') {
       steps {
         sh '''
-          export PATH="${WORKSPACE}/bin:${PATH}"
+          set -e
           export KUBECONFIG=${KUBECONFIG}
           
           echo "=== DEPLOYMENT VERIFICATION ==="
@@ -249,6 +269,8 @@ EOF
           else
             echo "IP address not yet available. Ingress may still be provisioning."
           fi
+
+          echo "SUCCESS: Application reachable at http://$IP/"
         '''
       }
     }
@@ -267,16 +289,21 @@ EOF
         """
         
         sh '''
-          rm -f /tmp/deployment-v1.0.yaml /tmp/deployment-v2.0.yaml 2>/dev/null || true
+          echo "=== POST-CHECKS ==="
+          export KUBECONFIG=${KUBECONFIG}
+          kubectl get pods,svc,ing -n java-app || true
+          echo "--- End of pipeline run ---"
         '''
       }
     }
+
     success {
       script {
         echo "Pipeline executed successfully!"
         echo "Deployment action '${params.DEPLOYMENT_ACTION ?: 'ROLLOUT'}' for version '${params.VERSION ?: 'v1.0'}' completed."
       }
     }
+
     failure {
       script {
         echo "Pipeline failed during '${params.DEPLOYMENT_ACTION ?: 'ROLLOUT'}' for version '${params.VERSION ?: 'v1.0'}'"
