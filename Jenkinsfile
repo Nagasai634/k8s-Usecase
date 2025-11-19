@@ -63,6 +63,7 @@ pipeline {
             cd java-gradle
             echo "Building ${version} using existing Dockerfile and static files..."
             mkdir -p src/main/resources/static
+            rm -f src/main/resources/static/index.html  # Clean any existing HTML
             
             if [ "${version}" = "v1.0" ]; then
               echo '<!DOCTYPE html><html><head><title>V1.0</title><style>body{background:#1e3a8a;color:white;text-align:center;padding:50px}.container{background:rgba(255,255,255,0.1);padding:30px;border-radius:10px;margin:auto;max-width:600px}h1{color:#60a5fa}.feature{background:#3b82f6;padding:10px;margin:10px;border-radius:5px}</style></head><body><div class="container"><h1>🚀 Version 1.0 - BLUE</h1><p>Simple Java Application</p></div></body></html>' > src/main/resources/static/index.html
