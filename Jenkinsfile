@@ -19,11 +19,11 @@ pipeline {
     REGION = 'us-central1'
     GAR_REPO = 'java-app'
     IMAGE_NAME = "java-app"
-    V1_TAG = "v1.0-${env.BUILD_NUMBER}"
     V2_TAG = "v2.0-${env.BUILD_NUMBER}"
+    V1_TAG = "v1.0-${env.BUILD_NUMBER}"
     GAR_HOST = "${env.REGION}-docker.pkg.dev"
-    GAR_IMAGE_V1 = "${env.GAR_HOST}/${env.PROJECT_ID}/${env.GAR_REPO}/${env.IMAGE_NAME}:${env.V1_TAG}"
     GAR_IMAGE_V2 = "${env.GAR_HOST}/${env.PROJECT_ID}/${env.GAR_REPO}/${env.IMAGE_NAME}:${env.V2_TAG}"
+    GAR_IMAGE_V1 = "${env.GAR_HOST}/${env.PROJECT_ID}/${env.GAR_REPO}/${env.IMAGE_NAME}:${env.V1_TAG}"
     CLUSTER_NAME = "autopilot-demo"
     KUBECONFIG = "${env.WORKSPACE}/.kube/config"
   }
