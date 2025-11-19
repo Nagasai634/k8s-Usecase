@@ -32,18 +32,8 @@ pipeline {
     stage('Clean Project') {
       steps {
         sh '''
-          # Debug: Check workspace contents after SCM checkout
-          echo "Current directory: $(pwd)"
-          echo "Workspace contents:"
-          ls -la
-          
-          # Check if required directory exists
-          if [ ! -d "k8s-Usecase/java-gradle" ]; then
-            echo "ERROR: Directory 'k8s-Usecase/java-gradle' not found in workspace. Check repo structure on branch 'feature'."
-            exit 1
-          fi
-          
-          cd k8s-Usecase/java-gradle
+          # Repo is already checked out via SCM; no need to clean or clone
+          cd java-gradle
           # Remove problematic files if they exist
           rm -f src/main/java/com/example/demo/VersionController.java 2>/dev/null || true
           chmod +x ./gradlew
@@ -68,7 +58,7 @@ pipeline {
         stage('Build v1.0') {
           steps {
             sh '''
-              cd k8s-Usecase/java-gradle
+              cd java-gradle
               echo "Building v1.0 using existing Dockerfile and static files..."
               ./gradlew clean build --no-daemon
               docker build -t ${GAR_IMAGE_V1} .
@@ -80,7 +70,7 @@ pipeline {
         stage('Build v2.0') {
           steps {
             sh '''
-              cd k8s-Usecase/java-gradle
+              cd java-gradle
               echo "Building v2.0 using existing Dockerfile and static files..."
               ./gradlew clean build --no-daemon
               docker build -t ${GAR_IMAGE_V2} .
@@ -146,9 +136,9 @@ EOF
           echo "Creating namespace and deploying infrastructure..."
           kubectl create namespace java-app --dry-run=client -o yaml | kubectl apply -f -
           
-          kubectl apply -f k8s-Usecase/configmap.yaml -n java-app
-          kubectl apply -f k8s-Usecase/service.yaml -n java-app
-          kubectl apply -f k8s-Usecase/ingress.yaml -n java-app
+          kubectl apply -f configmap.yaml -n java-app
+          kubectl apply -f service.yaml -n java-app
+          kubectl apply -f ingress.yaml -n java-app
           
           echo "Waiting for infrastructure to stabilize..."
           sleep 30
@@ -175,7 +165,7 @@ EOF
               echo "EXECUTING: Rolling out ${version}"
               echo "Using image: ${imageTag}"
               
-              cp k8s-Usecase/deployment.yaml /tmp/deployment-${version}.yaml
+              cp deployment.yaml /tmp/deployment-${version}.yaml
               sed -i "s|IMAGE_PLACEHOLDER|${imageTag}|g" /tmp/deployment-${version}.yaml
               sed -i "s|VERSION_PLACEHOLDER|${version}|g" /tmp/deployment-${version}.yaml
               
