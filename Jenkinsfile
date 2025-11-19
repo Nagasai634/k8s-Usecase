@@ -29,102 +29,9 @@ pipeline {
   }
 
   stages {
-    stage('Clean Project') {
+    stage('Clean Workspace') {
       steps {
         cleanWs()
-        sh '''
-          git clone https://github.com/Nagasai634/k8s-Usecase.git || true
-          cd k8s-Usecase/java-gradle
-          
-          # Create proper project structure
-          mkdir -p src/main/java/com/example/demo
-          mkdir -p src/main/resources/static
-          mkdir -p src/main/resources/templates
-          
-          # Create proper build.gradle
-          cat > build.gradle << 'EOF'
-plugins {
-    id 'java'
-    id 'org.springframework.boot' version '3.2.0'
-    id 'io.spring.dependency-management' version '1.1.4'
-}
-
-group = 'com.example'
-version = '1.0.0'
-sourceCompatibility = '17'
-
-repositories {
-    mavenCentral()
-}
-
-dependencies {
-    implementation 'org.springframework.boot:spring-boot-starter-web'
-    implementation 'org.springframework.boot:spring-boot-starter-actuator'
-    testImplementation 'org.springframework.boot:spring-boot-starter-test'
-}
-
-tasks.named('test') {
-    useJUnitPlatform()
-}
-
-jar {
-    enabled = true
-    archiveClassifier = '' 
-}
-
-bootJar {
-    enabled = true
-    mainClass = 'com.example.demo.DemoApplication'
-}
-EOF
-
-          # Create main application class
-          cat > src/main/java/com/example/demo/DemoApplication.java << 'EOF'
-package com.example.demo;
-
-import org.springframework.boot.SpringApplication;
-import org.springframework.boot.autoconfigure.SpringBootApplication;
-
-@SpringBootApplication
-public class DemoApplication {
-    public static void main(String[] args) {
-        SpringApplication.run(DemoApplication.class, args);
-    }
-}
-EOF
-
-          # Create health controller
-          cat > src/main/java/com/example/demo/HealthController.java << 'EOF'
-package com.example.demo;
-
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.RestController;
-
-@RestController
-public class HealthController {
-    
-    @GetMapping("/health")
-    public String health() {
-        return "OK";
-    }
-    
-    @GetMapping("/")
-    public String home() {
-        return "<!DOCTYPE html><html><head><title>Java App</title><style>body{font-family:Arial,sans-serif;text-align:center;padding:50px}</style></head><body><h1>Welcome to Java Application</h1><p>Application is running successfully!</p></body></html>";
-    }
-}
-EOF
-
-          # Create application properties
-          cat > src/main/resources/application.properties << 'EOF'
-server.port=8080
-spring.application.name=java-gradle-app
-management.endpoints.web.exposure.include=health,info
-management.endpoint.health.show-details=always
-EOF
-
-          chmod +x ./gradlew
-        '''
       }
     }
 
@@ -145,10 +52,9 @@ EOF
         stage('Build v1.0') {
           steps {
             sh '''
-              cd k8s-Usecase/java-gradle
+              cd java-gradle
               
               # Create v1.0 HTML content
-              mkdir -p src/main/resources/static
               cat > src/main/resources/static/index.html << 'EOF'
 <!DOCTYPE html>
 <html>
@@ -172,12 +78,6 @@ EOF
         h1 {
             color: #60a5fa;
         }
-        .feature {
-            background: #3b82f6;
-            padding: 10px;
-            margin: 10px;
-            border-radius: 5px;
-        }
     </style>
 </head>
 <body>
@@ -193,15 +93,6 @@ EOF
               echo "Building v1.0..."
               ./gradlew clean build --no-daemon
               
-              # Create Dockerfile if it doesn't exist
-              cat > Dockerfile << 'EOF'
-FROM eclipse-temurin:17-jre-jammy
-WORKDIR /app
-COPY build/libs/*.jar app.jar
-EXPOSE 8080
-ENTRYPOINT ["java", "-jar", "app.jar"]
-EOF
-
               docker build -t ${GAR_IMAGE_V1} .
               docker push ${GAR_IMAGE_V1}
               echo "✅ v1.0 build and push completed"
@@ -211,10 +102,9 @@ EOF
         stage('Build v2.0') {
           steps {
             sh '''
-              cd k8s-Usecase/java-gradle
+              cd java-gradle
               
               # Create v2.0 HTML content
-              mkdir -p src/main/resources/static
               cat > src/main/resources/static/index.html << 'EOF'
 <!DOCTYPE html>
 <html>
@@ -238,12 +128,6 @@ EOF
         h1 {
             color: #34d399;
         }
-        .feature {
-            background: #10b981;
-            padding: 10px;
-            margin: 10px;
-            border-radius: 5px;
-        }
     </style>
 </head>
 <body>
@@ -259,15 +143,6 @@ EOF
               echo "Building v2.0..."
               ./gradlew clean build --no-daemon
               
-              # Create Dockerfile if it doesn't exist
-              cat > Dockerfile << 'EOF'
-FROM eclipse-temurin:17-jre-jammy
-WORKDIR /app
-COPY build/libs/*.jar app.jar
-EXPOSE 8080
-ENTRYPOINT ["java", "-jar", "app.jar"]
-EOF
-
               docker build -t ${GAR_IMAGE_V2} .
               docker push ${GAR_IMAGE_V2}
               echo "✅ v2.0 build and push completed"
@@ -332,12 +207,12 @@ EOF
           kubectl create namespace java-app --dry-run=client -o yaml | kubectl apply -f -
           
           # Apply infrastructure resources
-          kubectl apply -f k8s-Usecase/configmap.yaml -n java-app
-          kubectl apply -f k8s-Usecase/service.yaml -n java-app
-          kubectl apply -f k8s-Usecase/ingress.yaml -n java-app
+          kubectl apply -f configmap.yaml -n java-app
+          kubectl apply -f service.yaml -n java-app
+          kubectl apply -f ingress.yaml -n java-app
           
           echo "Waiting for infrastructure to stabilize..."
-          sleep 30
+          sleep 10
         '''
       }
     }
@@ -429,17 +304,9 @@ EOF
               
               kubectl apply -f /tmp/deployment-${version}.yaml -n java-app --validate=false
               
-              echo "Waiting for pods to be ready..."
-              sleep 30
-              
-              echo "Waiting for rollout to complete (timeout: 10 minutes)..."
-              if kubectl rollout status deployment/java-gradle-app -n java-app --timeout=600s; then
+              echo "Waiting for rollout to complete (timeout: 5 minutes)..."
+              if kubectl rollout status deployment/java-gradle-app -n java-app --timeout=300s; then
                 echo "✅ Rollout completed successfully"
-                
-                # Test internal service connectivity
-                echo "Testing internal service connectivity..."
-                kubectl run test-pod --image=curlimages/curl -n java-app --rm -i --restart=Never -- curl -s http://java-gradle-service:80/health || echo "Internal service test completed"
-                
               else
                 echo "❌ Rollout failed or timed out. Debugging information:"
                 echo "=== Pod Status ==="
@@ -491,15 +358,15 @@ EOF
             echo "Testing application endpoint..."
             
             # Wait for application to be reachable
-            for i in {1..20}; do
+            for i in {1..10}; do
               if curl -f -s --connect-timeout 10 http://$IP/health > /dev/null; then
                 echo "✅ Application is responding successfully!"
                 echo "=== Application Content ==="
-                curl -s http://$IP/ | grep -E "(Welcome|Version|BLUE|GREEN)" | head -5 || echo "Content retrieved successfully"
+                curl -s http://$IP/ | head -10
                 break
               else
-                echo "Waiting for application to be reachable... (attempt $i/20)"
-                sleep 15
+                echo "Waiting for application to be reachable... (attempt $i/10)"
+                sleep 10
               fi
             done
           else
@@ -522,6 +389,11 @@ EOF
           echo "Build Number: ${BUILD_NUMBER}"
           echo "Status: ${currentResult}"
         """
+        
+        // Cleanup temp files
+        sh '''
+          rm -f /tmp/deployment-v1.0.yaml /tmp/deployment-v2.0.yaml 2>/dev/null || true
+        '''
       }
     }
   }
