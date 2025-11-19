@@ -62,14 +62,15 @@ pipeline {
           sh """
             cd java-gradle
             echo "Building ${version} using existing Dockerfile and static files..."
-            mkdir -p src/main/resources/static
-            rm -f src/main/resources/static/index.html  # Clean any existing HTML
             
+            # Customize index.html based on version
+            cp src/main/resources/static/index.html src/main/resources/static/index.html.tmp
             if [ "${version}" = "v1.0" ]; then
-              echo '<!DOCTYPE html><html><head><title>V1.0</title><style>body{background:#1e3a8a;color:white;text-align:center;padding:50px}.container{background:rgba(255,255,255,0.1);padding:30px;border-radius:10px;margin:auto;max-width:600px}h1{color:#60a5fa}.feature{background:#3b82f6;padding:10px;margin:10px;border-radius:5px}</style></head><body><div class="container"><h1>🚀 Version 1.0 - BLUE</h1><p>Simple Java Application</p></div></body></html>' > src/main/resources/static/index.html
+              sed -i 's/{{TITLE}}/V1.0/g; s/{{BACKGROUND}}/#1e3a8a/g; s/{{H1_COLOR}}/#60a5fa/g; s/{{FEATURE_BG}}/#3b82f6/g; s/{{EMOJI}}/🚀/g; s/{{VERSION_TEXT}}/Version 1.0 - BLUE/g; s/{{DESCRIPTION}}/Simple Java Application/g' src/main/resources/static/index.html.tmp
             else
-              echo '<!DOCTYPE html><html><head><title>V2.0</title><style>body{background:#065f46;color:white;text-align:center;padding:50px}.container{background:rgba(255,255,255,0.1);padding:30px;border-radius:10px;margin:auto;max-width:600px}h1{color:#34d399}.feature{background:#10b981;padding:10px;margin:10px;border-radius:5px}</style></head><body><div class="container"><h1>🎯 Version 2.0 - GREEN</h1><p>Enhanced Java Application</p></div></body></html>' > src/main/resources/static/index.html
+              sed -i 's/{{TITLE}}/V2.0/g; s/{{BACKGROUND}}/#065f46/g; s/{{H1_COLOR}}/#34d399/g; s/{{FEATURE_BG}}/#10b981/g; s/{{EMOJI}}/🎯/g; s/{{VERSION_TEXT}}/Version 2.0 - GREEN/g; s/{{DESCRIPTION}}/Enhanced Java Application/g' src/main/resources/static/index.html.tmp
             fi
+            mv src/main/resources/static/index.html.tmp src/main/resources/static/index.html
             
             ./gradlew clean build --no-daemon
             docker build -t ${imageTag} .
