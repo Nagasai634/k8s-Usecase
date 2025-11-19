@@ -3,6 +3,8 @@ kind: Service
 metadata:
   name: java-gradle-service
   namespace: java-app
+  annotations:
+    cloud.google.com/neg: '{"ingress": true}'
 spec:
   selector:
     app: java-gradle-app
