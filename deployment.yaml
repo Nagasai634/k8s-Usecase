@@ -5,7 +5,6 @@ metadata:
   namespace: java-app
   labels:
     app: java-gradle-app
-    version: VERSION_PLACEHOLDER
 spec:
   replicas: 2
   selector:
@@ -15,45 +14,38 @@ spec:
     metadata:
       labels:
         app: java-gradle-app
-        version: VERSION_PLACEHOLDER
     spec:
       containers:
       - name: java-app
         image: IMAGE_PLACEHOLDER
         ports:
         - containerPort: 8080
+          name: http
         envFrom:
         - configMapRef:
             name: app-config
         resources:
           requests:
-            cpu: "500m"
             memory: "512Mi"
+            cpu: "500m"
+            ephemeral-storage: "1Gi"
           limits:
-            cpu: "1000m"
             memory: "1Gi"
-        # Startup probe prevents the liveness probe from killing pods during slow startup.
-        startupProbe:
-          httpGet:
-            path: /
-            port: 8080
-          failureThreshold: 30
-          periodSeconds: 10
-          timeoutSeconds: 5
+            cpu: "1"
+            ephemeral-storage: "1Gi"
         livenessProbe:
           httpGet:
             path: /
             port: 8080
-          initialDelaySeconds: 60
-          periodSeconds: 20
-          timeoutSeconds: 5
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 1
           failureThreshold: 3
         readinessProbe:
           httpGet:
             path: /
             port: 8080
-          initialDelaySeconds: 10
+          initialDelaySeconds: 5
           periodSeconds: 5
-          timeoutSeconds: 3
+          timeoutSeconds: 1
           failureThreshold: 3
-        imagePullPolicy: Always
