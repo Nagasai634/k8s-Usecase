@@ -9,7 +9,7 @@ pipeline {
     )
     choice(
       name: 'VERSION',
-      choices: ['v1.0', 'v2.0'],
+      choices: ['v2.0', 'v1.0'],
       description: 'Choose version to deploy (only used for builds after the first)'
     )
   }
