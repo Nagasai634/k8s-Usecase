@@ -5,14 +5,10 @@ metadata:
   namespace: java-app
   annotations:
     kubernetes.io/ingress.class: "gce"
+    networking.gke.io/managed-certificates: java-app-certificate
 spec:
-  rules:
-  - http:
-      paths:
-      - path: /*
-        pathType: ImplementationSpecific
-        backend:
-          service:
-            name: java-gradle-service
-            port:
-              number: 80
+  defaultBackend:
+    service:
+      name: java-gradle-service
+      port:
+        number: 80
