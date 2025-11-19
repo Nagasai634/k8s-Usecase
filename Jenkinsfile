@@ -1,406 +1,263 @@
 pipeline {
   agent any
-
-  options {
-    skipDefaultCheckout()
-  }
-
+  
   parameters {
-    choice(name: 'DEPLOYMENT_ACTION',
-           choices: ['ROLLOUT', 'ROLLBACK'],
-           description: 'Choose deployment action (ignored on first run; first run auto-deploys v1.0)')
-    choice(name: 'VERSION',
-           choices: ['v1.0', 'v2.0'],
-           description: 'Choose version to deploy (ignored on first run)')
-    string(name: 'ALLOWED_IP_CIDR',
-           defaultValue: '136.119.42.77',
-           description: 'CIDR to whitelist on the ingress (change per-run)')
+    choice(
+      name: 'DEPLOYMENT_ACTION',
+      choices: ['ROLLOUT', 'ROLLBACK'],
+      description: 'Choose deployment action (only used for builds after the first)'
+    )
+    choice(
+      name: 'VERSION',
+      choices: ['v1.0', 'v2.0'],
+      description: 'Choose version to deploy (only used for builds after the first)'
+    )
   }
 
   environment {
-    // EDIT these for your environment
     PROJECT_ID = 'planar-door-476510-m1'
     REGION = 'us-central1'
-    CLUSTER_NAME = 'autopilot-demo'
     GAR_REPO = 'java-app'
-    IMAGE_NAME = 'java-app'
-
-    // Derived
-    WORKSPACE_BIN = "${env.WORKSPACE}/bin"
-    GAR_HOST = "${env.REGION}-docker.pkg.dev"
+    IMAGE_NAME = "java-app"
     V1_TAG = "v1.0-${env.BUILD_NUMBER}"
     V2_TAG = "v2.0-${env.BUILD_NUMBER}"
+    GAR_HOST = "${env.REGION}-docker.pkg.dev"
     GAR_IMAGE_V1 = "${env.GAR_HOST}/${env.PROJECT_ID}/${env.GAR_REPO}/${env.IMAGE_NAME}:${env.V1_TAG}"
     GAR_IMAGE_V2 = "${env.GAR_HOST}/${env.PROJECT_ID}/${env.GAR_REPO}/${env.IMAGE_NAME}:${env.V2_TAG}"
+    CLUSTER_NAME = "autopilot-demo"
     KUBECONFIG = "${env.WORKSPACE}/.kube/config"
-
-    // Safe-mode defaults
-    DEFAULT_DESIRED_REPLICAS = "3"
-    SAFE_REPLICAS = "1"
-    SAFE_REQUEST_CPU = "100m"
-    SAFE_LIMIT_CPU = "500m"
-    SAFE_REQUEST_MEM = "256Mi"
-    SAFE_LIMIT_MEM = "512Mi"
   }
 
   stages {
-    stage('Checkout Repo') {
+    stage('Clean Project') {
       steps {
-        checkout scm
-      }
-    }
-
-    stage('Ensure Tools') {
-      steps {
+        cleanWs()
         sh '''
-          set -e
-          mkdir -p "${WORKSPACE_BIN}"
-          if [ ! -x "${WORKSPACE_BIN}/kubectl" ]; then
-            KVER=$(curl -fsSL https://dl.k8s.io/release/stable.txt)
-            curl -fsSL "https://dl.k8s.io/release/${KVER}/bin/linux/amd64/kubectl" -o "${WORKSPACE_BIN}/kubectl"
-            chmod +x "${WORKSPACE_BIN}/kubectl"
-          fi
-          echo "kubectl (client):"
-          "${WORKSPACE_BIN}/kubectl" version --client || true
-
-          if command -v docker >/dev/null 2>&1; then
-            docker --version || true
-          else
-            echo "WARNING: docker not found on agent. Build/push will fail without docker."
-          fi
-
-          gcloud --version || true
+          git clone https://github.com/Nagasai634/k8s-Usecase.git || true
+          cd k8s-Usecase/java-gradle
+          # Remove problematic files
+          rm -f src/main/java/com/example/demo/VersionController.java 2>/dev/null || true
+          chmod +x ./gradlew
         '''
       }
     }
 
-    stage('Build & Push Images') {
+    stage('Setup Tools') {
       steps {
-        withCredentials([file(credentialsId: 'gcp-service-account-key', variable: 'GCP_SA_KEYFILE')]) {
-          sh '''
-            set -e
-            export GOOGLE_APPLICATION_CREDENTIALS="${GCP_SA_KEYFILE}"
-            gcloud auth activate-service-account --key-file="${GOOGLE_APPLICATION_CREDENTIALS}"
-            gcloud config set project ${PROJECT_ID}
-            gcloud auth configure-docker ${GAR_HOST} --quiet || true
+        sh '''
+          mkdir -p ${WORKSPACE}/bin
+          curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          chmod +x ./kubectl
+          mv ./kubectl ${WORKSPACE}/bin/
+          export PATH="${WORKSPACE}/bin:${PATH}"
+        '''
+      }
+    }
 
-            # --- Find the java-gradle build directory (robust against slightly different layout)
-            if [ -d "k8s-Usecase/java-gradle" ]; then
+    stage('Build Versions') {
+      parallel {
+        stage('Build v1.0') {
+          steps {
+            sh '''
               cd k8s-Usecase/java-gradle
-            elif [ -d "java-gradle" ]; then
-              cd java-gradle
-            else
-              echo "Could not find java-gradle directory at k8s-Usecase/java-gradle or java-gradle. Trying workspace root."
-            fi
-
-            mkdir -p src/main/resources/static
-
-            # --- v1
-            cat > src/main/resources/static/index.html <<'EOF'
-<!DOCTYPE html><html><head><title>V1.0</title></head><body><h1>Version 1.0 - BLUE</h1></body></html>
-EOF
-            ./gradlew clean build --no-daemon || true
-            docker build -t $GAR_IMAGE_V1 . || true
-            for i in 1 2 3; do docker push $GAR_IMAGE_V1 && break || { echo "push v1 attempt $i failed"; sleep 5; }; done || true
-
-            # --- v2
-            cat > src/main/resources/static/index.html <<'EOF'
-<!DOCTYPE html><html><head><title>V2.0</title></head><body><h1>Version 2.0 - GREEN</h1></body></html>
-EOF
-            ./gradlew clean build --no-daemon || true
-            docker build -t $GAR_IMAGE_V2 . || true
-            for i in 1 2 3; do docker push $GAR_IMAGE_V2 && break || { echo "push v2 attempt $i failed"; sleep 5; }; done || true
-          '''
+              mkdir -p src/main/resources/static
+              echo '<!DOCTYPE html><html><head><title>V1.0</title><style>body{background:#1e3a8a;color:white;text-align:center;padding:50px}.container{background:rgba(255,255,255,0.1);padding:30px;border-radius:10px;margin:auto;max-width:600px}h1{color:#60a5fa}.feature{background:#3b82f6;padding:10px;margin:10px;border-radius:5px}</style></head><body><div class="container"><h1>🚀 Version 1.0 - BLUE</h1><p>Simple Java Application</p></div></body></html>' > src/main/resources/static/index.html
+              ./gradlew clean build --no-daemon
+              docker build -t ${GAR_IMAGE_V1} .
+              docker push ${GAR_IMAGE_V1}
+            '''
+          }
+        }
+        stage('Build v2.0') {
+          steps {
+            sh '''
+              cd k8s-Usecase/java-gradle
+              mkdir -p src/main/resources/static
+              echo '<!DOCTYPE html><html><head><title>V2.0</title><style>body{background:#065f46;color:white;text-align:center;padding:50px}.container{background:rgba(255,255,255,0.1);padding:30px;border-radius:10px;margin:auto;max-width:600px}h1{color:#34d399}.feature{background:#10b981;padding:10px;margin:10px;border-radius:5px}</style></head><body><div class="container"><h1>🎯 Version 2.0 - GREEN</h1><p>Enhanced Java Application</p></div></body></html>' > src/main/resources/static/index.html
+              ./gradlew clean build --no-daemon
+              docker build -t ${GAR_IMAGE_V2} .
+              docker push ${GAR_IMAGE_V2}
+            '''
+          }
         }
       }
     }
 
-    stage('Authenticate to GKE') {
+    stage('Setup GKE Access') {
       steps {
         withCredentials([file(credentialsId: 'gcp-service-account-key', variable: 'GCP_SA_KEYFILE')]) {
           sh '''
-            set -e
-            export GOOGLE_APPLICATION_CREDENTIALS="${GCP_SA_KEYFILE}"
-            gcloud auth activate-service-account --key-file="${GOOGLE_APPLICATION_CREDENTIALS}"
+            export PATH="${WORKSPACE}/bin:${PATH}"
+            export KUBECONFIG=${KUBECONFIG}
+            gcloud auth activate-service-account --key-file="$GCP_SA_KEYFILE"
             gcloud config set project ${PROJECT_ID}
-            gcloud container clusters get-credentials $CLUSTER_NAME --region=$REGION --project=$PROJECT_ID --quiet
-
-            mkdir -p "$(dirname $KUBECONFIG)"
-            "$WORKSPACE_BIN/kubectl" config view --raw > "$KUBECONFIG"
-            echo "Wrote kubeconfig to $KUBECONFIG"
-            "$WORKSPACE_BIN/kubectl" --kubeconfig="$KUBECONFIG" cluster-info || true
-          '''
-        }
-      }
-    }
-
-    stage('Verify Authentication') {
-      steps {
-        script {
-          def authCheck = sh(script: '''$WORKSPACE_BIN/kubectl --kubeconfig=$KUBECONFIG cluster-info 2>/dev/null | grep -q "Kubernetes control plane" && echo "AUTH_SUCCESS" || echo "AUTH_FAILED"''', returnStdout: true).trim()
-          if (authCheck == 'AUTH_FAILED') {
-            echo "WARNING: Authentication to GKE failed. Skipping Kubernetes operations. Please check service account permissions and Jenkins environment."
-            env.SKIP_K8S = 'true'
-          } else {
-            echo "Authentication successful."
-            env.SKIP_K8S = 'false'
-          }
-        }
-      }
-    }
-
-    stage('Decide Action (first-run detection)') {
-      when {
-        expression { env.SKIP_K8S != 'true' }
-      }
-      steps {
-        script {
-          def exists = sh(script: '''$WORKSPACE_BIN/kubectl --kubeconfig=$KUBECONFIG -n java-app get deploy java-gradle-app --ignore-not-found=true --no-headers -o name || true''', returnStdout: true).trim()
-          boolean deployedBefore = exists != ''
-          if (!deployedBefore) {
-            env.EFFECTIVE_ACTION = 'ROLLOUT'
-            env.EFFECTIVE_VERSION = 'v1.0'
-            echo "FIRST RUN -> forcing ROLLOUT of v1.0"
-          } else {
-            env.EFFECTIVE_ACTION = params.DEPLOYMENT_ACTION
-            env.EFFECTIVE_VERSION = params.VERSION
-            echo "Using requested parameters"
-          }
-          echo "EFFECTIVE_ACTION=${env.EFFECTIVE_ACTION}"
-          echo "EFFECTIVE_VERSION=${env.EFFECTIVE_VERSION}"
-        }
-      }
-    }
-
-    stage('Check CPU Quota & Decide SAFE Mode') {
-      when {
-        expression { env.SKIP_K8S != 'true' }
-      }
-      steps {
-        withCredentials([file(credentialsId: 'gcp-service-account-key', variable: 'GCP_SA_KEYFILE')]) {
-          sh '''
-            set -e
-            export GOOGLE_APPLICATION_CREDENTIALS="${GCP_SA_KEYFILE}"
-            gcloud auth activate-service-account --key-file="${GOOGLE_APPLICATION_CREDENTIALS}"
-            gcloud config set project $PROJECT_ID
-
-            DESIRED=$DEFAULT_DESIRED_REPLICAS
-            REQ_PER_POD_M=250
-            REQ_TOTAL_M=$((DESIRED * REQ_PER_POD_M))
-
-            QLINE=$(gcloud compute regions describe $REGION --project=$PROJECT_ID --format="value(quotas[?metric=='CPUS'].limit,quotas[?metric=='CPUS'].usage)" || echo "")
-            if [ -z "$QLINE" ]; then
-              echo "Could not read CPUS quota -> SAFE mode"
-              echo "USE_SAFE=1" > /tmp/decide_mode
-            else
-              LIMIT=$(echo $QLINE | awk '{print $1}')
-              USAGE=$(echo $QLINE | awk '{print $2}')
-              if [ -z "$LIMIT" ] || [ -z "$USAGE" ]; then
-                echo "Empty LIMIT or USAGE -> SAFE mode"
-                echo "USE_SAFE=1" > /tmp/decide_mode
-              else
-                AVAIL_M=$(python3 - <<PY
-limit=${LIMIT}
-usage=${USAGE}
-avail = float(limit) - float(usage)
-print(int(avail*1000))
-PY
-)
-                echo "CPUs limit=${LIMIT}, usage=${USAGE}, avail_m=${AVAIL_M}"
-                if [ ${AVAIL_M} -lt ${REQ_TOTAL_M} ]; then
-                  echo "Not enough CPU quota (${AVAIL_M}m < ${REQ_TOTAL_M}m) -> SAFE"
-                  echo "USE_SAFE=1" > /tmp/decide_mode
-                else
-                  echo "Quota sufficient -> NORMAL"
-                  echo "USE_SAFE=0" > /tmp/decide_mode
-                fi
-              fi
+            
+            CLUSTER_ENDPOINT=$(gcloud container clusters describe ${CLUSTER_NAME} --region=${REGION} --format="value(endpoint)")
+            CLUSTER_CA=$(gcloud container clusters describe ${CLUSTER_NAME} --region=${REGION} --format="value(masterAuth.clusterCaCertificate)" | base64 -d | base64 -w 0)
+            
+            TOKEN=$(gcloud auth print-access-token)
+            
+            mkdir -p ${WORKSPACE}/.kube
+            cat > ${KUBECONFIG} <<EOF
+apiVersion: v1
+kind: Config
+current-context: ${CLUSTER_NAME}
+contexts:
+- name: ${CLUSTER_NAME}
+  context:
+    cluster: ${CLUSTER_NAME}
+    user: ${CLUSTER_NAME}
+clusters:
+- name: ${CLUSTER_NAME}
+  cluster:
+    certificate-authority-data: ${CLUSTER_CA}
+    server: https://${CLUSTER_ENDPOINT}
+users:
+- name: ${CLUSTER_NAME}
+  user:
+    token: ${TOKEN}
+EOF
+            
+            if ! kubectl cluster-info --kubeconfig=${KUBECONFIG}; then
+              echo "ERROR: Kubeconfig validation failed"
+              exit 1
             fi
-            cat /tmp/decide_mode || true
+            echo "Kubeconfig created and validated"
           '''
         }
       }
     }
 
-    stage('Apply base manifests') {
-      when {
-        expression { env.SKIP_K8S != 'true' }
-      }
+    stage('Clean Existing Deployment') {
       steps {
         sh '''
-          set -e
-          export KUBECONFIG="$KUBECONFIG"
-          KUBECTL="$WORKSPACE_BIN/kubectl"
-
-          ${KUBECTL} create namespace java-app --dry-run=client -o yaml | ${KUBECTL} apply -f - --validate=false || echo "Namespace creation skipped/failed"
-          ${KUBECTL} apply -f k8s-Usecase/configmap.yaml -n java-app --validate=false || true
-          ${KUBECTL} apply -f k8s-Usecase/service.yaml -n java-app --validate=false || true
-          ${KUBECTL} apply -f k8s-Usecase/ingress.yaml -n java-app --validate=false || true
-          ${KUBECTL} apply -f k8s-Usecase/hpa.yaml -n java-app --validate=false || true
+          export PATH="${WORKSPACE}/bin:${PATH}"
+          export KUBECONFIG=${KUBECONFIG}
+          
+          echo "Cleaning up existing deployment resources..."
+          
+          kubectl delete deployment java-gradle-app -n java-app --ignore-not-found=true --timeout=30s
+          kubectl delete replicaset -l app=java-gradle-app -n java-app --ignore-not-found=true --timeout=30s
+          
+          echo "Waiting for resources to be cleaned up..."
+          sleep 20
+          
+          kubectl get deployment,replicaset,pod -n java-app --ignore-not-found=true
         '''
       }
     }
 
-    stage('Perform Action (Rollout / Rollback)') {
-      when {
-        expression { env.SKIP_K8S != 'true' }
-      }
+    stage('Execute User Requested Action') {
       steps {
         script {
-          // read safe-mode decision (use triple-quoted Groovy string for single-line sh to avoid parser issues)
-          def safeFlag = sh(script: """cat /tmp/decide_mode 2>/dev/null || echo 'USE_SAFE=1'; grep -o 'USE_SAFE=[01]' /tmp/decide_mode 2>/dev/null || echo 'USE_SAFE=1'""", returnStdout: true).trim()
-          boolean safeMode = safeFlag.contains('USE_SAFE=1')
-
-          def imageToUse = (env.EFFECTIVE_VERSION == 'v1.0') ? env.GAR_IMAGE_V1 : env.GAR_IMAGE_V2
-          def cidr = params.ALLOWED_IP_CIDR ?: env.ALLOWED_IP_CIDR
-
-          if (env.EFFECTIVE_ACTION == 'ROLLOUT') {
-            echo "ROLLOUT image=${imageToUse} safeMode=${safeMode}"
-
-            sh '''
-              set -e
-              export KUBECONFIG="$KUBECONFIG"
-              KUBECTL="$WORKSPACE_BIN/kubectl"
-
-              cp k8s-Usecase/deployment.yaml /tmp/deployment-"$EFFECTIVE_VERSION".yaml
-              sed -i "s|IMAGE_PLACEHOLDER|'"$imageToUse"'|g" /tmp/deployment-"$EFFECTIVE_VERSION".yaml
-              sed -i "s|VERSION_PLACEHOLDER|'"$EFFECTIVE_VERSION"'|g" /tmp/deployment-"$EFFECTIVE_VERSION".yaml
-
-              ${KUBECTL} apply -f /tmp/deployment-"$EFFECTIVE_VERSION".yaml -n java-app --validate=false || echo "Deployment apply failed"
-            '''
-
-            if (safeMode) {
-              echo "Applying SAFE patches (replicas=${SAFE_REPLICAS})"
-              sh '''
-                set -e
-                export KUBECONFIG="$KUBECONFIG"
-                KUBECTL="$WORKSPACE_BIN/kubectl"
-
-                ${KUBECTL} scale deployment/java-gradle-app -n java-app --replicas=$SAFE_REPLICAS || true
-                ${KUBECTL} patch deployment java-gradle-app -n java-app --type='merge' -p '{
-                  "spec":{
-                    "template":{
-                      "spec":{
-                        "containers":[
-                          {
-                            "name":"java-app",
-                            "resources":{
-                              "requests":{"cpu":"'"$SAFE_REQUEST_CPU"'","memory":"'"$SAFE_REQUEST_MEM"'"},
-                              "limits":{"cpu":"'"$SAFE_LIMIT_CPU"'","memory":"'"$SAFE_LIMIT_MEM"'"}
-                            },
-                            "readinessProbe":{
-                              "httpGet":{"path":"/","port":8080},
-                              "initialDelaySeconds":8,
-                              "periodSeconds":5,
-                              "failureThreshold":6
-                            }
-                          }
-                        ]
-                      }
-                    }
-                  }
-                }' || true
-              '''
-            } else {
-              echo "Ensuring readinessProbe present"
-              sh '''
-                set -e
-                export KUBECONFIG="$KUBECONFIG"
-                KUBECTL="$WORKSPACE_BIN/kubectl"
-
-                ${KUBECTL} patch deployment java-gradle-app -n java-app --type='merge' -p '{
-                  "spec":{
-                    "template":{
-                      "spec":{
-                        "containers":[
-                          {
-                            "name":"java-app",
-                            "readinessProbe":{
-                              "httpGet":{"path":"/","port":8080},
-                              "initialDelaySeconds":8,
-                              "periodSeconds":5,
-                              "failureThreshold":6
-                            }
-                          }
-                        ]
-                      }
-                    }
-                  }
-                }' || true
-              '''
-            }
-
-            // patch ingress whitelist
-            sh '''
-              set -e
-              export KUBECONFIG="$KUBECONFIG"
-              KUBECTL="$WORKSPACE_BIN/kubectl"
-              ${KUBECTL} patch ingress java-app-ingress -n java-app --type='merge' -p '{"metadata":{"annotations":{"nginx.ingress.kubernetes.io/whitelist-source-range":"'"$ALLOWED_IP_CIDR"'"}}}' || echo "Ingress whitelist patch skipped/failed"
-            '''
-
-            // wait for rollout or collect debug info on failure
-            sh '''
-              set -e
-              export KUBECONFIG="$KUBECONFIG"
-              KUBECTL="$WORKSPACE_BIN/kubectl"
-
-              if ${KUBECTL} rollout status deployment/java-gradle-app -n java-app --timeout=900s; then
-                echo "Rollout succeeded."
+          def action
+          def version
+          
+          if (env.BUILD_NUMBER == '1') {
+            action = 'ROLLOUT'
+            version = 'v1.0'
+            echo "First build: Automatically deploying v1.0"
+          } else {
+            action = params.DEPLOYMENT_ACTION
+            version = params.VERSION
+            echo "USER REQUESTED ACTION: ${action}"
+            echo "SELECTED VERSION: ${version}"
+          }
+          
+          def imageTag = (version == 'v1.0') ? env.GAR_IMAGE_V1 : env.GAR_IMAGE_V2
+          
+          sh """
+            export PATH="${WORKSPACE}/bin:${PATH}"
+            export KUBECONFIG=${KUBECONFIG}
+            
+            if [ "${action}" = "ROLLOUT" ]; then
+              echo "EXECUTING: Rolling out ${version}"
+              kubectl create namespace java-app --dry-run=client -o yaml | kubectl apply -f -
+              
+              echo "Using image: ${imageTag}"
+              
+              cp k8s-Usecase/deployment.yaml /tmp/deployment-${version}.yaml
+              sed -i "s|IMAGE_PLACEHOLDER|${imageTag}|g" /tmp/deployment-${version}.yaml
+              sed -i "s|VERSION_PLACEHOLDER|${version}|g" /tmp/deployment-${version}.yaml
+              
+              kubectl apply -f k8s-Usecase/configmap.yaml -f /tmp/deployment-${version}.yaml -n java-app --validate=false
+              
+              echo "Waiting for rollout to complete (timeout: 10 minutes)..."
+              if kubectl rollout status deployment/java-gradle-app -n java-app --timeout=600s; then
+                echo "Rollout completed successfully"
               else
-                echo "Rollout timed out/failed - collecting debug info"
-                ${KUBECTL} describe deployment java-gradle-app -n java-app || true
-                ${KUBECTL} get pods -n java-app -o wide || true
-                for P in $(${KUBECTL} get pods -n java-app -l app=java-gradle-app -o name 2>/dev/null || echo ""); do
-                  echo "=== LOGS for ${P} ==="
-                  ${KUBECTL} logs -n java-app ${P} --tail=200 || true
+                echo "Rollout failed or timed out. Debugging information:"
+                echo "=== Deployment Details ==="
+                kubectl describe deployment java-gradle-app -n java-app
+                echo "=== Pod Status ==="
+                kubectl get pods -n java-app -o wide
+                echo "=== ReplicaSet Status ==="
+                kubectl get replicaset -n java-app -o wide
+                echo "=== Pod Logs (first container each pod) ==="
+                for POD in \$(kubectl get pods -l app=java-gradle-app -n java-app -o name); do
+                  echo "--- Logs for \${POD} ---"
+                  kubectl logs \${POD} -n java-app --tail=50 || echo "No logs available"
                 done
-                ${KUBECTL} get events -n java-app --sort-by=.lastTimestamp | tail -n 80 || true
+                echo "=== Events ==="
+                kubectl get events -n java-app --sort-by=.lastTimestamp | tail -30
                 exit 1
               fi
-            '''
-          } else {
-            echo "ROLLBACK requested"
-            sh '''
-              set -e
-              export KUBECONFIG="$KUBECONFIG"
-              KUBECTL="$WORKSPACE_BIN/kubectl"
-
-              ${KUBECTL} rollout undo deployment/java-gradle-app -n java-app || { echo "rollback failed"; exit 1; }
-              ${KUBECTL} rollout status deployment/java-gradle-app -n java-app --timeout=300s || { echo "rollback wait failed"; exit 1; }
-            '''
-          }
+              
+            else
+              echo "EXECUTING: Rolling back"
+              if kubectl rollout undo deployment/java-gradle-app -n java-app; then
+                kubectl rollout status deployment/java-gradle-app -n java-app --timeout=300s
+                echo "Rollback completed successfully"
+              else
+                echo "Rollback failed"
+                exit 1
+              fi
+            fi
+          """
         }
       }
     }
 
-    stage('Verify & Test (attempt homepage fetch)') {
-      when {
-        expression { env.SKIP_K8S != 'true' }
-      }
+    stage('Verify Deployment') {
       steps {
         sh '''
-          set -e
-          export KUBECONFIG="$KUBECONFIG"
-          KUBECTL="$WORKSPACE_BIN/kubectl"
-
-          echo "=== DEPLOYMENT ==="
-          ${KUBECTL} get deployment java-gradle-app -n java-app -o wide || true
-          ${KUBECTL} get pods -l app=java-gradle-app -n java-app -o wide || true
-
-          echo "=== SERVICE & INGRESS ==="
-          ${KUBECTL} get svc -n java-app || true
-          ${KUBECTL} get ingress java-app-ingress -n java-app -o yaml || true
-
-          IP=$(${KUBECTL} get ingress java-app-ingress -n java-app -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
-          if [ -z "$IP" ]; then
-            echo "Ingress IP not available yet."
+          export PATH="${WORKSPACE}/bin:${PATH}"
+          export KUBECONFIG=${KUBECONFIG}
+          
+          echo "=== DEPLOYMENT VERIFICATION ==="
+          echo "Deployment Status:"
+          kubectl get deployment java-gradle-app -n java-app -o wide
+          
+          echo "Pod Status:"
+          kubectl get pods -l app=java-gradle-app -n java-app -o wide
+          
+          echo "ReplicaSet Status:"
+          kubectl get replicaset -l app=java-gradle-app -n java-app -o wide
+          
+          echo "Service Details:"
+          kubectl get service java-gradle-service -n java-app -o wide
+          
+          echo "Ingress Details:"
+          kubectl get ingress java-app-ingress -n java-app -o wide
+          
+          IP=$(kubectl get ingress java-app-ingress -n java-app -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "Pending")
+          echo "Application URL: http://$IP"
+          
+          if [ "$IP" != "Pending" ] && [ ! -z "$IP" ]; then
+            echo "Testing application endpoint..."
+            for i in {1..10}; do
+              if curl -s --connect-timeout 5 http://$IP > /dev/null; then
+                echo "Application is responding"
+                echo "Application content:"
+                curl -s http://$IP | grep -o "Version [0-9]\\.[0-9] - [A-Z]*" | head -1 || echo "Content check failed"
+                break
+              else
+                echo "Waiting for application to be ready... (attempt $i/10)"
+                sleep 10
+              fi
+            done
           else
-            echo "Ingress IP: $IP"
-            if curl -s --connect-timeout 5 http://$IP/ | head -n 10; then
-              echo "Homepage fetched successfully (agent)."
-            else
-              echo "Could not fetch homepage from agent. If agent IP not allowed by ALLOWED_IP_CIDR, test from allowed client."
-            fi
+            echo "IP address not yet available. Ingress may still be provisioning."
           fi
         '''
       }
@@ -411,17 +268,35 @@ PY
     always {
       script {
         def currentResult = currentBuild.result ?: 'SUCCESS'
-        echo "=== PIPELINE SUMMARY ==="
-        echo "Requested action: ${params.DEPLOYMENT_ACTION}"
-        echo "Selected version: ${params.VERSION}"
-        echo "Effective action: ${env.EFFECTIVE_ACTION}"
-        echo "Effective version: ${env.EFFECTIVE_VERSION}"
-        echo "Build number: ${env.BUILD_NUMBER}"
-        echo "Status: ${currentResult}"
+        sh """
+          echo "=== PIPELINE EXECUTION SUMMARY ==="
+          echo "Action Requested: ${params.DEPLOYMENT_ACTION ?: 'N/A'}"
+          echo "Version Selected: ${params.VERSION ?: 'N/A'}"
+          echo "Build Number: ${BUILD_NUMBER}"
+          echo "Status: ${currentResult}"
+        """
+        
+        sh '''
+          rm -f /tmp/deployment-v1.0.yaml /tmp/deployment-v2.0.yaml 2>/dev/null || true
+        '''
       }
-      sh '''rm -f /tmp/deployment-* /tmp/decide_mode 2>/dev/null || true'''
     }
-    success { echo "Pipeline completed successfully." }
-    failure { echo "Pipeline failed."}
+    success {
+      script {
+        echo "Pipeline executed successfully!"
+        echo "Deployment action '${params.DEPLOYMENT_ACTION ?: 'ROLLOUT (first build)'}' for version '${params.VERSION ?: 'v1.0 (first build)'}' completed."
+      }
+    }
+    failure {
+      script {
+        echo "Pipeline failed during '${params.DEPLOYMENT_ACTION ?: 'ROLLOUT (first build)'}' for version '${params.VERSION ?: 'v1.0 (first build)'}'"
+        echo "Check the detailed logs above for troubleshooting information."
+      }
+    }
+    unstable {
+      script {
+        echo "Pipeline marked as unstable"
+      }
+    }
   }
 }
