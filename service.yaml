@@ -3,17 +3,11 @@ kind: Service
 metadata:
   name: java-gradle-service
   namespace: java-app
-  annotations:
-    cloud.google.com/neg: '{"ingress": true}'
-    cloud.google.com/backend-config: '{"default": "java-app-backend-config"}'
-  labels:
-    app: java-gradle-app
 spec:
   selector:
     app: java-gradle-app
   ports:
-  - name: http
-    port: 80
+  - port: 80
     targetPort: 8080
     protocol: TCP
   type: ClusterIP
