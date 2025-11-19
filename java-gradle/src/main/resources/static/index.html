@@ -1,14 +1,36 @@
-src/main/resources/static/index.html
-
-<!doctype html>
-<html lang="en">
+<!DOCTYPE html>
+<html>
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Simple Java App</title>
+    <title>{{TITLE}}</title>
+    <style>
+        body {
+            background: {{BACKGROUND}};
+            color: white;
+            text-align: center;
+            padding: 50px;
+        }
+        .container {
+            background: rgba(255, 255, 255, 0.1);
+            padding: 30px;
+            border-radius: 10px;
+            margin: auto;
+            max-width: 600px;
+        }
+        h1 {
+            color: {{H1_COLOR}};
+        }
+        .feature {
+            background: {{FEATURE_BG}};
+            padding: 10px;
+            margin: 10px;
+            border-radius: 5px;
+        }
+    </style>
 </head>
 <body>
-  <h1>Hello — this is the index page!</h1>
-  <p>Served from a minimal Java HTTP server inside Docker.</p>
+    <div class="container">
+        <h1>{{EMOJI}} {{VERSION_TEXT}}</h1>
+        <p>{{DESCRIPTION}}</p>
+    </div>
 </body>
-</html> 
+</html>
