@@ -1,8 +1,12 @@
 apiVersion: cloud.google.com/v1
 kind: BackendConfig
 metadata:
-  name: java-gradle-backendconfig
-  namespace: java-gradle-ns
+  name: java-app-backend-config
+  namespace: java-app
 spec:
-  securityPolicy:
-    name: java-gradle-cloud-armor-policy   # must match the Cloud Armor policy created via gcloud below
+  healthCheck:
+    checkIntervalSec: 30
+    port: 8080
+    type: HTTP
+    requestPath: /health
+  timeoutSec: 30
