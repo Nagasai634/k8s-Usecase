@@ -37,6 +37,28 @@ pipeline {
           cd k8s-Usecase/java-gradle
           # Remove problematic files
           rm -f src/main/java/com/example/demo/VersionController.java 2>/dev/null || true
+          # Create health endpoint
+          mkdir -p src/main/java/com/example/demo
+          cat > src/main/java/com/example/demo/HealthController.java << 'EOF'
+package com.example.demo;
+
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+public class HealthController {
+    
+    @GetMapping("/health")
+    public String health() {
+        return "OK";
+    }
+    
+    @GetMapping("/")
+    public String home() {
+        return "<!DOCTYPE html><html><head><title>Java App</title><style>body{font-family:Arial,sans-serif;text-align:center;padding:50px}</style></head><body><h1>Welcome to Java Application</h1><p>Application is running successfully!</p></body></html>";
+    }
+}
+EOF
           chmod +x ./gradlew
         '''
       }
@@ -128,21 +150,29 @@ EOF
       }
     }
 
-    stage('Clean Existing Deployment') {
+    stage('Deploy Infrastructure') {
       steps {
         sh '''
           export PATH="${WORKSPACE}/bin:${PATH}"
           export KUBECONFIG=${KUBECONFIG}
           
-          echo "Cleaning up existing deployment resources..."
+          echo "Creating namespace and deploying infrastructure..."
+          kubectl create namespace java-app --dry-run=client -o yaml | kubectl apply -f -
           
-          kubectl delete deployment java-gradle-app -n java-app --ignore-not-found=true --timeout=30s
-          kubectl delete replicaset -l app=java-gradle-app -n java-app --ignore-not-found=true --timeout=30s
+          # Clean up any existing resources
+          kubectl delete ingress java-app-ingress -n java-app --ignore-not-found=true
+          kubectl delete service java-gradle-service -n java-app --ignore-not-found=true
+          kubectl delete backendconfig java-app-backend-config -n java-app --ignore-not-found=true
+          sleep 10
           
-          echo "Waiting for resources to be cleaned up..."
-          sleep 20
+          # Apply infrastructure resources
+          kubectl apply -f k8s-Usecase/configmap.yaml -n java-app
+          kubectl apply -f k8s-Usecase/backendconfig.yaml -n java-app
+          kubectl apply -f k8s-Usecase/service.yaml -n java-app
+          kubectl apply -f k8s-Usecase/ingress.yaml -n java-app
           
-          kubectl get deployment,replicaset,pod -n java-app --ignore-not-found=true
+          echo "Waiting for infrastructure to stabilize..."
+          sleep 30
         '''
       }
     }
@@ -172,7 +202,6 @@ EOF
             
             if [ "${action}" = "ROLLOUT" ]; then
               echo "EXECUTING: Rolling out ${version}"
-              kubectl create namespace java-app --dry-run=client -o yaml | kubectl apply -f -
               
               echo "Using image: ${imageTag}"
               
@@ -180,24 +209,33 @@ EOF
               sed -i "s|IMAGE_PLACEHOLDER|${imageTag}|g" /tmp/deployment-${version}.yaml
               sed -i "s|VERSION_PLACEHOLDER|${version}|g" /tmp/deployment-${version}.yaml
               
-              kubectl apply -f k8s-Usecase/configmap.yaml -f /tmp/deployment-${version}.yaml -n java-app --validate=false
+              kubectl apply -f /tmp/deployment-${version}.yaml -n java-app --validate=false
+              
+              echo "Waiting for pods to be ready..."
+              # Wait for pods to be created first
+              sleep 30
               
               echo "Waiting for rollout to complete (timeout: 10 minutes)..."
               if kubectl rollout status deployment/java-gradle-app -n java-app --timeout=600s; then
-                echo "Rollout completed successfully"
+                echo "✅ Rollout completed successfully"
+                
+                # Test internal service connectivity
+                echo "Testing internal service connectivity..."
+                kubectl run test-pod --image=curlimages/curl -n java-app --rm -i --restart=Never -- curl -s http://java-gradle-service:80/health || echo "Internal service test failed"
+                
               else
-                echo "Rollout failed or timed out. Debugging information:"
+                echo "❌ Rollout failed or timed out. Debugging information:"
                 echo "=== Deployment Details ==="
                 kubectl describe deployment java-gradle-app -n java-app
                 echo "=== Pod Status ==="
                 kubectl get pods -n java-app -o wide
-                echo "=== ReplicaSet Status ==="
-                kubectl get replicaset -n java-app -o wide
-                echo "=== Pod Logs (first container each pod) ==="
+                echo "=== Pod Logs ==="
                 for POD in \$(kubectl get pods -l app=java-gradle-app -n java-app -o name); do
                   echo "--- Logs for \${POD} ---"
-                  kubectl logs \${POD} -n java-app --tail=50 || echo "No logs available"
+                  kubectl logs \${POD} -n java-app --tail=100 || echo "No logs available"
                 done
+                echo "=== Service Endpoints ==="
+                kubectl get endpoints java-gradle-service -n java-app
                 echo "=== Events ==="
                 kubectl get events -n java-app --sort-by=.lastTimestamp | tail -30
                 exit 1
@@ -231,33 +269,64 @@ EOF
           echo "Pod Status:"
           kubectl get pods -l app=java-gradle-app -n java-app -o wide
           
-          echo "ReplicaSet Status:"
-          kubectl get replicaset -l app=java-gradle-app -n java-app -o wide
-          
           echo "Service Details:"
           kubectl get service java-gradle-service -n java-app -o wide
+          
+          echo "Service Endpoints:"
+          kubectl get endpoints java-gradle-service -n java-app
           
           echo "Ingress Details:"
           kubectl get ingress java-app-ingress -n java-app -o wide
           
-          IP=$(kubectl get ingress java-app-ingress -n java-app -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "Pending")
-          echo "Application URL: http://$IP"
+          # Wait for ingress IP to be assigned (longer wait for GCP LB)
+          echo "Waiting for Ingress IP assignment (this can take 5-10 minutes)..."
+          IP=""
+          for i in {1..60}; do
+            IP=$(kubectl get ingress java-app-ingress -n java-app -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
+            if [ ! -z "$IP" ] && [ "$IP" != "null" ]; then
+              echo "✅ IP assigned: $IP"
+              break
+            fi
+            echo "Waiting for IP... (attempt $i/60 - ~$((i*1)) minutes)"
+            sleep 60
+          done
           
-          if [ "$IP" != "Pending" ] && [ ! -z "$IP" ]; then
-            echo "Testing application endpoint..."
-            for i in {1..10}; do
-              if curl -s --connect-timeout 5 http://$IP > /dev/null; then
-                echo "Application is responding"
-                echo "Application content:"
-                curl -s http://$IP | grep -o "Version [0-9]\\.[0-9] - [A-Z]*" | head -1 || echo "Content check failed"
+          if [ ! -z "$IP" ] && [ "$IP" != "null" ]; then
+            echo "Application URL: http://$IP"
+            echo "Testing application endpoint (this can take a few minutes after IP assignment)..."
+            
+            # Wait for application to be reachable through LB
+            for i in {1..30}; do
+              if curl -f -s --connect-timeout 10 http://$IP/health > /dev/null; then
+                echo "✅ Application is responding successfully through Load Balancer!"
+                echo "=== Application Content ==="
+                curl -s http://$IP/ | grep -E "(Welcome|Version|BLUE|GREEN)" | head -5 || echo "Content retrieved successfully"
                 break
               else
-                echo "Waiting for application to be ready... (attempt $i/10)"
-                sleep 10
+                echo "Waiting for application to be reachable through Load Balancer... (attempt $i/30)"
+                sleep 30
               fi
             done
+            
+            # Final test
+            if curl -f -s --connect-timeout 10 http://$IP/health; then
+              echo "🎉 SUCCESS: Application is fully operational!"
+              echo "🌐 Access your application at: http://$IP"
+            else
+              echo "❌ Application not reachable through Load Balancer after waiting"
+              echo "Debugging information:"
+              kubectl describe ingress java-app-ingress -n java-app
+              echo "=== Backend Services ==="
+              gcloud compute backend-services list --format="table(name, protocol, loadBalancingScheme)"
+              exit 1
+            fi
           else
-            echo "IP address not yet available. Ingress may still be provisioning."
+            echo "❌ IP address not assigned after 60 minutes. Check ingress configuration."
+            echo "Debugging information:"
+            kubectl describe ingress java-app-ingress -n java-app
+            echo "=== GCP Load Balancer Status ==="
+            gcloud compute forwarding-rules list --format="table(name, IPAddress, target.scope())"
+            exit 1
           fi
         '''
       }
@@ -279,23 +348,6 @@ EOF
         sh '''
           rm -f /tmp/deployment-v1.0.yaml /tmp/deployment-v2.0.yaml 2>/dev/null || true
         '''
-      }
-    }
-    success {
-      script {
-        echo "Pipeline executed successfully!"
-        echo "Deployment action '${params.DEPLOYMENT_ACTION ?: 'ROLLOUT (first build)'}' for version '${params.VERSION ?: 'v1.0 (first build)'}' completed."
-      }
-    }
-    failure {
-      script {
-        echo "Pipeline failed during '${params.DEPLOYMENT_ACTION ?: 'ROLLOUT (first build)'}' for version '${params.VERSION ?: 'v1.0 (first build)'}'"
-        echo "Check the detailed logs above for troubleshooting information."
-      }
-    }
-    unstable {
-      script {
-        echo "Pipeline marked as unstable"
       }
     }
   }
