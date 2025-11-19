@@ -52,7 +52,7 @@ pipeline {
         stage('Build v1.0') {
           steps {
             sh '''
-              cd java-gradle
+              cd k8s-Usecase/java-gradle
               
               # Create v1.0 HTML content
               cat > src/main/resources/static/index.html << 'EOF'
@@ -102,7 +102,7 @@ EOF
         stage('Build v2.0') {
           steps {
             sh '''
-              cd java-gradle
+               cd k8s-Usecase/java-gradle
               
               # Create v2.0 HTML content
               cat > src/main/resources/static/index.html << 'EOF'
