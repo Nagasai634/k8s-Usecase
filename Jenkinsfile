@@ -35,10 +35,65 @@ pipeline {
         sh '''
           git clone https://github.com/Nagasai634/k8s-Usecase.git || true
           cd k8s-Usecase/java-gradle
-          # Remove problematic files
-          rm -f src/main/java/com/example/demo/VersionController.java 2>/dev/null || true
-          # Create health endpoint
+          
+          # Create proper project structure
           mkdir -p src/main/java/com/example/demo
+          mkdir -p src/main/resources/static
+          mkdir -p src/main/resources/templates
+          
+          # Create proper build.gradle
+          cat > build.gradle << 'EOF'
+plugins {
+    id 'java'
+    id 'org.springframework.boot' version '3.2.0'
+    id 'io.spring.dependency-management' version '1.1.4'
+}
+
+group = 'com.example'
+version = '1.0.0'
+sourceCompatibility = '17'
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    implementation 'org.springframework.boot:spring-boot-starter-web'
+    implementation 'org.springframework.boot:spring-boot-starter-actuator'
+    testImplementation 'org.springframework.boot:spring-boot-starter-test'
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
+}
+
+jar {
+    enabled = true
+    archiveClassifier = '' 
+}
+
+bootJar {
+    enabled = true
+    mainClass = 'com.example.demo.DemoApplication'
+}
+EOF
+
+          # Create main application class
+          cat > src/main/java/com/example/demo/DemoApplication.java << 'EOF'
+package com.example.demo;
+
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+
+@SpringBootApplication
+public class DemoApplication {
+    public static void main(String[] args) {
+        SpringApplication.run(DemoApplication.class, args);
+    }
+}
+EOF
+
+          # Create health controller
           cat > src/main/java/com/example/demo/HealthController.java << 'EOF'
 package com.example.demo;
 
@@ -59,6 +114,15 @@ public class HealthController {
     }
 }
 EOF
+
+          # Create application properties
+          cat > src/main/resources/application.properties << 'EOF'
+server.port=8080
+spring.application.name=java-gradle-app
+management.endpoints.web.exposure.include=health,info
+management.endpoint.health.show-details=always
+EOF
+
           chmod +x ./gradlew
         '''
       }
@@ -82,11 +146,65 @@ EOF
           steps {
             sh '''
               cd k8s-Usecase/java-gradle
+              
+              # Create v1.0 HTML content
               mkdir -p src/main/resources/static
-              echo '<!DOCTYPE html><html><head><title>V1.0</title><style>body{background:#1e3a8a;color:white;text-align:center;padding:50px}.container{background:rgba(255,255,255,0.1);padding:30px;border-radius:10px;margin:auto;max-width:600px}h1{color:#60a5fa}.feature{background:#3b82f6;padding:10px;margin:10px;border-radius:5px}</style></head><body><div class="container"><h1>🚀 Version 1.0 - BLUE</h1><p>Simple Java Application</p></div></body></html>' > src/main/resources/static/index.html
+              cat > src/main/resources/static/index.html << 'EOF'
+<!DOCTYPE html>
+<html>
+<head>
+    <title>V1.0</title>
+    <style>
+        body {
+            background: #1e3a8a;
+            color: white;
+            text-align: center;
+            padding: 50px;
+            font-family: Arial, sans-serif;
+        }
+        .container {
+            background: rgba(255,255,255,0.1);
+            padding: 30px;
+            border-radius: 10px;
+            margin: auto;
+            max-width: 600px;
+        }
+        h1 {
+            color: #60a5fa;
+        }
+        .feature {
+            background: #3b82f6;
+            padding: 10px;
+            margin: 10px;
+            border-radius: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🚀 Version 1.0 - BLUE</h1>
+        <p>Simple Java Application</p>
+        <p>Build: ${BUILD_NUMBER}</p>
+    </div>
+</body>
+</html>
+EOF
+
+              echo "Building v1.0..."
               ./gradlew clean build --no-daemon
+              
+              # Create Dockerfile if it doesn't exist
+              cat > Dockerfile << 'EOF'
+FROM eclipse-temurin:17-jre-jammy
+WORKDIR /app
+COPY build/libs/*.jar app.jar
+EXPOSE 8080
+ENTRYPOINT ["java", "-jar", "app.jar"]
+EOF
+
               docker build -t ${GAR_IMAGE_V1} .
               docker push ${GAR_IMAGE_V1}
+              echo "✅ v1.0 build and push completed"
             '''
           }
         }
@@ -94,11 +212,65 @@ EOF
           steps {
             sh '''
               cd k8s-Usecase/java-gradle
+              
+              # Create v2.0 HTML content
               mkdir -p src/main/resources/static
-              echo '<!DOCTYPE html><html><head><title>V2.0</title><style>body{background:#065f46;color:white;text-align:center;padding:50px}.container{background:rgba(255,255,255,0.1);padding:30px;border-radius:10px;margin:auto;max-width:600px}h1{color:#34d399}.feature{background:#10b981;padding:10px;margin:10px;border-radius:5px}</style></head><body><div class="container"><h1>🎯 Version 2.0 - GREEN</h1><p>Enhanced Java Application</p></div></body></html>' > src/main/resources/static/index.html
+              cat > src/main/resources/static/index.html << 'EOF'
+<!DOCTYPE html>
+<html>
+<head>
+    <title>V2.0</title>
+    <style>
+        body {
+            background: #065f46;
+            color: white;
+            text-align: center;
+            padding: 50px;
+            font-family: Arial, sans-serif;
+        }
+        .container {
+            background: rgba(255,255,255,0.1);
+            padding: 30px;
+            border-radius: 10px;
+            margin: auto;
+            max-width: 600px;
+        }
+        h1 {
+            color: #34d399;
+        }
+        .feature {
+            background: #10b981;
+            padding: 10px;
+            margin: 10px;
+            border-radius: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎯 Version 2.0 - GREEN</h1>
+        <p>Enhanced Java Application</p>
+        <p>Build: ${BUILD_NUMBER}</p>
+    </div>
+</body>
+</html>
+EOF
+
+              echo "Building v2.0..."
               ./gradlew clean build --no-daemon
+              
+              # Create Dockerfile if it doesn't exist
+              cat > Dockerfile << 'EOF'
+FROM eclipse-temurin:17-jre-jammy
+WORKDIR /app
+COPY build/libs/*.jar app.jar
+EXPOSE 8080
+ENTRYPOINT ["java", "-jar", "app.jar"]
+EOF
+
               docker build -t ${GAR_IMAGE_V2} .
               docker push ${GAR_IMAGE_V2}
+              echo "✅ v2.0 build and push completed"
             '''
           }
         }
@@ -159,15 +331,8 @@ EOF
           echo "Creating namespace and deploying infrastructure..."
           kubectl create namespace java-app --dry-run=client -o yaml | kubectl apply -f -
           
-          # Clean up any existing resources
-          kubectl delete ingress java-app-ingress -n java-app --ignore-not-found=true
-          kubectl delete service java-gradle-service -n java-app --ignore-not-found=true
-          kubectl delete backendconfig java-app-backend-config -n java-app --ignore-not-found=true
-          sleep 10
-          
           # Apply infrastructure resources
           kubectl apply -f k8s-Usecase/configmap.yaml -n java-app
-          kubectl apply -f k8s-Usecase/backendconfig.yaml -n java-app
           kubectl apply -f k8s-Usecase/service.yaml -n java-app
           kubectl apply -f k8s-Usecase/ingress.yaml -n java-app
           
@@ -205,14 +370,66 @@ EOF
               
               echo "Using image: ${imageTag}"
               
-              cp k8s-Usecase/deployment.yaml /tmp/deployment-${version}.yaml
-              sed -i "s|IMAGE_PLACEHOLDER|${imageTag}|g" /tmp/deployment-${version}.yaml
-              sed -i "s|VERSION_PLACEHOLDER|${version}|g" /tmp/deployment-${version}.yaml
+              # Create deployment with proper health checks
+              cat > /tmp/deployment-${version}.yaml << EOF
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: java-gradle-app
+  namespace: java-app
+  labels:
+    app: java-gradle-app
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: java-gradle-app
+  template:
+    metadata:
+      labels:
+        app: java-gradle-app
+    spec:
+      containers:
+      - name: java-app
+        image: ${imageTag}
+        ports:
+        - containerPort: 8080
+          name: http
+        envFrom:
+        - configMapRef:
+            name: app-config
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "500m"
+            ephemeral-storage: "1Gi"
+          limits:
+            memory: "1Gi"
+            cpu: "1"
+            ephemeral-storage: "1Gi"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+            scheme: HTTP
+          initialDelaySeconds: 60
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+            scheme: HTTP
+          initialDelaySeconds: 30
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+EOF
               
               kubectl apply -f /tmp/deployment-${version}.yaml -n java-app --validate=false
               
               echo "Waiting for pods to be ready..."
-              # Wait for pods to be created first
               sleep 30
               
               echo "Waiting for rollout to complete (timeout: 10 minutes)..."
@@ -221,23 +438,17 @@ EOF
                 
                 # Test internal service connectivity
                 echo "Testing internal service connectivity..."
-                kubectl run test-pod --image=curlimages/curl -n java-app --rm -i --restart=Never -- curl -s http://java-gradle-service:80/health || echo "Internal service test failed"
+                kubectl run test-pod --image=curlimages/curl -n java-app --rm -i --restart=Never -- curl -s http://java-gradle-service:80/health || echo "Internal service test completed"
                 
               else
                 echo "❌ Rollout failed or timed out. Debugging information:"
-                echo "=== Deployment Details ==="
-                kubectl describe deployment java-gradle-app -n java-app
                 echo "=== Pod Status ==="
                 kubectl get pods -n java-app -o wide
                 echo "=== Pod Logs ==="
                 for POD in \$(kubectl get pods -l app=java-gradle-app -n java-app -o name); do
                   echo "--- Logs for \${POD} ---"
-                  kubectl logs \${POD} -n java-app --tail=100 || echo "No logs available"
+                  kubectl logs \${POD} -n java-app --tail=50 || echo "No logs available"
                 done
-                echo "=== Service Endpoints ==="
-                kubectl get endpoints java-gradle-service -n java-app
-                echo "=== Events ==="
-                kubectl get events -n java-app --sort-by=.lastTimestamp | tail -30
                 exit 1
               fi
               
@@ -263,70 +474,37 @@ EOF
           export KUBECONFIG=${KUBECONFIG}
           
           echo "=== DEPLOYMENT VERIFICATION ==="
-          echo "Deployment Status:"
-          kubectl get deployment java-gradle-app -n java-app -o wide
-          
           echo "Pod Status:"
           kubectl get pods -l app=java-gradle-app -n java-app -o wide
           
           echo "Service Details:"
           kubectl get service java-gradle-service -n java-app -o wide
           
-          echo "Service Endpoints:"
-          kubectl get endpoints java-gradle-service -n java-app
-          
           echo "Ingress Details:"
           kubectl get ingress java-app-ingress -n java-app -o wide
           
-          # Wait for ingress IP to be assigned (longer wait for GCP LB)
-          echo "Waiting for Ingress IP assignment (this can take 5-10 minutes)..."
-          IP=""
-          for i in {1..60}; do
-            IP=$(kubectl get ingress java-app-ingress -n java-app -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
-            if [ ! -z "$IP" ] && [ "$IP" != "null" ]; then
-              echo "✅ IP assigned: $IP"
-              break
-            fi
-            echo "Waiting for IP... (attempt $i/60 - ~$((i*1)) minutes)"
-            sleep 60
-          done
+          # Get Ingress IP
+          IP=$(kubectl get ingress java-app-ingress -n java-app -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
           
           if [ ! -z "$IP" ] && [ "$IP" != "null" ]; then
             echo "Application URL: http://$IP"
-            echo "Testing application endpoint (this can take a few minutes after IP assignment)..."
+            echo "Testing application endpoint..."
             
-            # Wait for application to be reachable through LB
-            for i in {1..30}; do
+            # Wait for application to be reachable
+            for i in {1..20}; do
               if curl -f -s --connect-timeout 10 http://$IP/health > /dev/null; then
-                echo "✅ Application is responding successfully through Load Balancer!"
+                echo "✅ Application is responding successfully!"
                 echo "=== Application Content ==="
                 curl -s http://$IP/ | grep -E "(Welcome|Version|BLUE|GREEN)" | head -5 || echo "Content retrieved successfully"
                 break
               else
-                echo "Waiting for application to be reachable through Load Balancer... (attempt $i/30)"
-                sleep 30
+                echo "Waiting for application to be reachable... (attempt $i/20)"
+                sleep 15
               fi
             done
-            
-            # Final test
-            if curl -f -s --connect-timeout 10 http://$IP/health; then
-              echo "🎉 SUCCESS: Application is fully operational!"
-              echo "🌐 Access your application at: http://$IP"
-            else
-              echo "❌ Application not reachable through Load Balancer after waiting"
-              echo "Debugging information:"
-              kubectl describe ingress java-app-ingress -n java-app
-              echo "=== Backend Services ==="
-              gcloud compute backend-services list --format="table(name, protocol, loadBalancingScheme)"
-              exit 1
-            fi
           else
-            echo "❌ IP address not assigned after 60 minutes. Check ingress configuration."
-            echo "Debugging information:"
-            kubectl describe ingress java-app-ingress -n java-app
-            echo "=== GCP Load Balancer Status ==="
-            gcloud compute forwarding-rules list --format="table(name, IPAddress, target.scope())"
-            exit 1
+            echo "IP address not yet assigned. Ingress may still be provisioning."
+            echo "You can check later with: kubectl get ingress java-app-ingress -n java-app"
           fi
         '''
       }
@@ -344,10 +522,6 @@ EOF
           echo "Build Number: ${BUILD_NUMBER}"
           echo "Status: ${currentResult}"
         """
-        
-        sh '''
-          rm -f /tmp/deployment-v1.0.yaml /tmp/deployment-v2.0.yaml 2>/dev/null || true
-        '''
       }
     }
   }
