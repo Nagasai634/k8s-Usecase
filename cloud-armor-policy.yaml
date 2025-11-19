@@ -14,5 +14,6 @@ spec:
       config:
         srcIpRanges:
         - "34.46.245.248"  # Your current IP
+        - "136.110.196.142"
         - "0.0.0.0/0"         # Temporary - remove after testing
     description: "Allow specific IP addresses"
